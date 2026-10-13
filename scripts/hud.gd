@@ -1,308 +1,608 @@
 extends Control
+## Presentation only: the run owns pause, upgrades, and restart transitions.
 
-const INK := Color("eee6d6")
-const MUTED := Color("91a3a7")
-const GOLD := Color("d8ad71")
-const TEAL := Color("7fc4c8")
+signal pause_requested
+signal restart_requested
+signal upgrade_selected(index: int)
+signal frame_limit_requested(fps: int)
+signal shake_changed(enabled: bool)
+
+const INK := Color("eee7d7")
+const MUTED := Color("9aabb0")
+const GOLD := Color("e4b76d")
+const TEAL := Color("80d6cf")
+const RED := Color("df7772")
 const FONT = preload("res://assets/fonts/interface.tres")
 const DISPLAY = preload("res://assets/fonts/display.tres")
+const MAX_POPUPS := 40
+const POPUP_LIFETIME := 0.72
 
-@onready var arena: Node3D = get_parent().get_parent()
-var displayed_hp := 1.0
-var chip_hp := 1.0
-var hit_glow := 0.0
-var notice := "按住 J / 左键 连段  ·  G 切换厉鬼  ·  K 裂环斩"
-var notice_left := 7.0
+var arena: Node
 var popups: Array[Dictionary] = []
+var notice := ""
+var notice_left := 0.0
 var pause_panel: Control
 var pause_button: Button
 var frame_select: OptionButton
+var choice_panel: Control
+var result_panel: Control
+
+var _base: MarginContainer
+var _health: ProgressBar
+var _health_text: Label
+var _level: Label
+var _experience: ProgressBar
+var _experience_text: Label
+var _time_label: Label
+var _phase: Label
+var _counts: Label
+var _boss_panel: PanelContainer
+var _boss_health: ProgressBar
+var _boss_text: Label
+var _skill_row: HBoxContainer
+var _skill_widgets: Dictionary = {}
+var _notice_label: Label
+var _hint: Label
+var _shake: CheckButton
+var _mute: CheckButton
+var _stat_text: Label
+var _choice_box: PanelContainer
+var _choice_title: Label
+var _choice_subtitle: Label
+var _choice_buttons: Array[Button] = []
+var _choice_labels: Array[Dictionary] = []
+var _choice_count := 0
+var _choice_submitted := false
+var _result_title: Label
+var _result_description: Label
+var _result_summary: Label
+var _result_button: Button
+var _refresh_left := 0.0
+var _popup_sequence := 0
+
+
+func setup(run: Node) -> void:
+	arena = run
+	if is_node_ready():
+		sync_frame_limit(int(arena.frame_limit))
+		_shake.set_pressed_no_signal(bool(arena.shake_enabled))
+		_refresh()
+
 
 func _ready() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS
-	var vignette := ColorRect.new()
-	vignette.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	vignette.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	var vignette_material := ShaderMaterial.new()
-	vignette_material.shader = preload("res://shaders/vignette.gdshader")
-	vignette.material = vignette_material
-	vignette.show_behind_parent = true
-	add_child(vignette)
-	move_child(vignette, 0)
-	# Draw ornaments on top of the vignette, while native buttons handle pause input.
+	mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var ui_theme := Theme.new()
+	ui_theme.default_font = FONT
+	ui_theme.default_font_size = 16
+	ui_theme.set_color("font_color", "Label", INK)
+	theme = ui_theme
+	_build_gameplay()
 	_build_pause()
+	_build_choices()
+	_build_result()
+	resized.connect(_fit_layout)
+	_fit_layout()
+	if is_instance_valid(arena):
+		setup(arena)
+
 
 func _process(delta: float) -> void:
-	if not get_tree().paused:
-		displayed_hp = move_toward(displayed_hp, float(arena.enemy.health) / 100, delta * 4.0)
-		chip_hp = move_toward(chip_hp, displayed_hp, delta * 0.55)
-		hit_glow = maxf(0, hit_glow - delta * 3.0)
-		notice_left = maxf(0, notice_left - delta)
+	if not is_instance_valid(arena):
+		return
+	if arena.state == "playing":
 		for item in popups:
 			item.age += delta
-		popups = popups.filter(func(item: Dictionary) -> bool: return item.age < 0.85)
+		popups = popups.filter(func(item: Dictionary) -> bool: return item.age < POPUP_LIFETIME)
+		notice_left = maxf(0.0, notice_left - delta)
+	_refresh_left -= delta
+	if _refresh_left <= 0.0:
+		_refresh_left = 0.08
+		_refresh()
 	queue_redraw()
 
-func _unhandled_input(event: InputEvent) -> void:
-	if not arena.ready_to_play:
-		return
-	if event.is_action_pressed("pause") and not event.is_echo():
-		toggle_pause()
-		get_viewport().set_input_as_handled()
 
-func toggle_pause() -> void:
-	get_tree().paused = not get_tree().paused
-	pause_panel.visible = get_tree().paused
-	if get_tree().paused:
+func _unhandled_input(event: InputEvent) -> void:
+	if not is_instance_valid(arena) or event.is_echo():
+		return
+	var state: String = arena.state
+	if event.is_action_pressed("pause") and state in ["playing", "paused"]:
+		get_viewport().set_input_as_handled()
+		pause_requested.emit()
+	elif event.is_action_pressed("restart") and state in ["paused", "won", "lost"]:
+		get_viewport().set_input_as_handled()
+		restart_requested.emit()
+	elif state == "choosing" and event is InputEventKey and event.pressed:
+		var key: int = event.physical_keycode if event.physical_keycode != 0 else event.keycode
+		if key >= KEY_1 and key <= KEY_3:
+			get_viewport().set_input_as_handled()
+			_choose(key - KEY_1)
+
+
+func _refresh() -> void:
+	if not is_instance_valid(arena) or not is_instance_valid(arena.player) or not is_instance_valid(arena.progression):
+		return
+	var player = arena.player
+	var progression = arena.progression
+	var stats = player.stats
+	_health.max_value = maxf(1.0, float(stats.max_health))
+	_health.value = float(player.health)
+	_health_text.text = "%d / %d" % [ceili(player.health), roundi(stats.max_health)]
+	_level.text = "Lv.%02d" % int(progression.level)
+	_experience.max_value = maxi(1, int(progression.xp_required()))
+	_experience.value = float(progression.xp)
+	_experience_text.text = "经验  %d / %d" % [int(progression.xp), int(_experience.max_value)]
+	if is_instance_valid(arena.director):
+		_time_label.text = "%s / %s" % [_clock(arena.director.elapsed), _clock(arena.director.duration)]
+		_phase.text = str(arena.director.phase_name)
+		_counts.text = "击杀 %d  ·  场上 %d" % [arena.defeat_count, arena.director.get_alive_count()]
+	_update_skill("ring", float(player.skill_cooldown), false, 0.0)
+	_update_skill("ghost", float(player.ghost_cooldown), bool(player.ghost_active), float(player.ghost_left))
+	_update_skill("swords", 0.0, false, 0.0)
+	_update_skill("meteor", 0.0, false, 0.0)
+	var boss = arena.boss
+	_boss_panel.visible = is_instance_valid(boss) and not boss.dead
+	if _boss_panel.visible:
+		_boss_health.max_value = maxf(1.0, float(boss.stats.max_health))
+		_boss_health.value = float(boss.health)
+		_boss_text.text = "终局首领    %d / %d" % [ceili(boss.health), roundi(boss.stats.max_health)]
+	_notice_label.text = notice if notice_left > 0.0 else ""
+	if pause_panel.visible:
+		_update_stats(stats)
+	if choice_panel.visible:
+		_update_choice_heading()
+
+
+func _update_skill(id: String, cooldown: float, active: bool, remaining: float) -> void:
+	var widgets: Dictionary = _skill_widgets[id]
+	var level: int = arena.progression.skill_level(id)
+	var definition = arena.progression.skill(id)
+	var title: Label = widgets.title
+	var status: Label = widgets.status
+	var bar: ProgressBar = widgets.bar
+	title.text = "%s  Lv.%d" % [definition.title, level]
+	title.add_theme_color_override("font_color", INK if level > 0 else MUTED)
+	if level <= 0:
+		status.text = "升级时可领悟"
+		status.add_theme_color_override("font_color", MUTED)
+		bar.value = 0.0
+	elif id in ["swords", "meteor"]:
+		status.text = "普攻触发追击" if id == "swords" else "攻击概率落星"
+		status.add_theme_color_override("font_color", TEAL)
+		bar.value = 1.0
+	elif active:
+		status.text = "解放中  %.1f 秒" % remaining
+		status.add_theme_color_override("font_color", GOLD)
+		bar.value = clampf(remaining / maxf(0.1, definition.duration_at(level)), 0.0, 1.0)
+	else:
+		status.text = "就绪" if cooldown <= 0.0 else "冷却  %.1f 秒" % cooldown
+		status.add_theme_color_override("font_color", TEAL if cooldown <= 0.0 else MUTED)
+		bar.value = clampf(1.0 - cooldown / maxf(0.1, float(definition.cooldown) * float(arena.player.stats.cooldown_multiplier)), 0.0, 1.0)
+
+
+func _update_stats(stats: Resource) -> void:
+	var element_names := ["无属性", "火", "冰", "光", "暗"]
+	_stat_text.text = "物理攻击    %.0f\n魔法攻击    %.0f\n独立攻击    %.0f\n暴击率    %.0f%%    暴伤    %.0f%%\n闪避率    %.0f%%    吸血    %.1f%%\n移动速度    %.1f\n物理防御    %.0f    魔法防御    %.0f\n当前属性    %s\n火 / 冰 / 光 / 暗强化\n%.0f%% / %.0f%% / %.0f%% / %.0f%%" % [
+		stats.physical_attack, stats.magic_attack, stats.independent_attack,
+		stats.crit_chance * 100.0, stats.crit_multiplier * 100.0,
+		stats.dodge_chance * 100.0, stats.life_steal * 100.0, stats.move_speed,
+		stats.physical_defense, stats.magic_defense,
+		element_names[clampi(int(stats.element), 0, 4)],
+		stats.element_bonus[0] * 100.0, stats.element_bonus[1] * 100.0,
+		stats.element_bonus[2] * 100.0, stats.element_bonus[3] * 100.0,
+	]
+
+
+func show_pause(value: bool) -> void:
+	pause_panel.visible = value
+	if value:
+		choice_panel.hide()
+		result_panel.hide()
+		_shake.set_pressed_no_signal(bool(arena.shake_enabled))
+		_mute.set_pressed_no_signal(AudioServer.is_bus_mute(0))
+		_refresh()
 		pause_button.grab_focus()
+	else:
+		_release_focus()
+
+
+func show_choices(options: Array[Dictionary]) -> void:
+	pause_panel.hide()
+	result_panel.hide()
+	choice_panel.show()
+	_choice_count = mini(3, options.size())
+	_choice_submitted = false
+	_update_choice_heading()
+	for i in _choice_buttons.size():
+		var button := _choice_buttons[i]
+		button.visible = i < _choice_count
+		button.disabled = i >= _choice_count
+		if i >= _choice_count:
+			continue
+		var option: Dictionary = options[i]
+		var labels: Dictionary = _choice_labels[i]
+		var category := str(option.get("category", "stat"))
+		var category_title := "技能领悟" if category == "skill" else ("属性剑意" if category == "element" else "基础修行")
+		labels.category.text = "%02d  /  %s" % [i + 1, category_title]
+		labels.category.add_theme_color_override("font_color", TEAL if category == "skill" else GOLD)
+		labels.title.text = str(option.get("title", "成长"))
+		labels.description.text = str(option.get("description", ""))
+		button.tooltip_text = "%s\n%s" % [labels.title.text, labels.description.text]
+		button.focus_neighbor_left = button.get_path_to(_choice_buttons[(i + _choice_count - 1) % _choice_count])
+		button.focus_neighbor_right = button.get_path_to(_choice_buttons[(i + 1) % _choice_count])
+		button.focus_previous = button.focus_neighbor_left
+		button.focus_next = button.focus_neighbor_right
+	if _choice_count > 0:
+		_choice_buttons[0].grab_focus()
+
+
+func _update_choice_heading() -> void:
+	_choice_title.text = "破境 · 三选一"
+	_choice_subtitle.text = "Lv.%d  选择一项成长，继续你的剑道" % int(arena.progression.level)
+	if int(arena.progression.pending_levels) > 1:
+		_choice_subtitle.text += "  ·  尚有 %d 次选择" % int(arena.progression.pending_levels)
+
+
+func _choose(index: int) -> void:
+	if not is_instance_valid(arena) or arena.state != "choosing" or _choice_submitted or index < 0 or index >= _choice_count:
+		return
+	_choice_submitted = true
+	for button in _choice_buttons:
+		button.disabled = true
+	choice_panel.hide()
+	_release_focus()
+	upgrade_selected.emit(index)
+
+
+func show_result(won: bool) -> void:
+	pause_panel.hide()
+	choice_panel.hide()
+	result_panel.show()
+	_result_title.text = "破阵而归" if won else "剑意未熄"
+	_result_title.add_theme_color_override("font_color", GOLD if won else INK)
+	_result_description.text = "首领已倒下，这一战属于你。" if won else "此番止步，下一局再问剑。"
+	_result_summary.text = "存活时间  %s\n击败敌人  %d\n最终等级  Lv.%d" % [_clock(arena.director.elapsed), arena.defeat_count, arena.progression.level]
+	_result_button.grab_focus()
+
 
 func reset_hud() -> void:
-	pause_panel.hide()
 	popups.clear()
-	displayed_hp = 1.0
-	chip_hp = 1.0
-	hit_glow = 0.0
-	notice = "按住 J / 左键 连段  ·  G 切换厉鬼  ·  K 裂环斩"
-	notice_left = 4.0
-
-func hit(point: Vector3, lethal: bool, damage: int, heavy: bool, source: String = "") -> void:
-	hit_glow = 1.0
-	popups.append({"point": point + Vector3.UP * 2.2, "age": 0.0, "lethal": lethal, "damage": damage, "heavy": heavy, "source": source, "offset": float(popups.size() % 3 - 1) * 21.0 if source == "厉鬼" else 0.0})
-	notice = "击破 · 守卫即将归位" if lethal else ""
-	notice_left = 2.8 if lethal else 0.0
-
-func _draw() -> void:
-	if not is_instance_valid(arena) or not is_instance_valid(arena.player):
-		return
-	var w := size.x
-	var h := size.y
-	var m := 52.0
-	# Header: editorial typography and a quiet copper rule.
-	draw_line(Vector2(m, 46), Vector2(m + 24, 46), GOLD, 2)
-	_text("近  战  习  作", Vector2(m + 35, 52), 13, MUTED)
-	_text("烬 庭", Vector2(m - 2, 111), 47, INK)
-	_text("E M B E R   Y A R D", Vector2(m, 141), 13, GOLD, DISPLAY)
-	_right("试炼场  /  01", Vector2(w - m, 62), 19, INK)
-	_right("一击之间，自有分量。", Vector2(w - m, 92), 14, MUTED)
-	_right("COMBAT STUDY  ·  %d FPS" % arena.frame_limit, Vector2(w - m, 119), 11, GOLD, DISPLAY)
-	var center := w / 2.0
-	var guard_count: int = arena.guards.size()
-	var living_guards := 0
-	_center("骸 骨 守 卫 × %d" % guard_count, Vector2(center, 65), 18, INK)
-	# One segment per guard makes the group state distinct from a single boss bar.
-	var segment_width := (280.0 - maxf(guard_count - 1, 0) * 5.0) / maxf(guard_count, 1)
-	for i in range(guard_count):
-		var guard: DuelFighter = arena.guards[i]
-		if guard.health > 0:
-			living_guards += 1
-		var hp := clampf(float(guard.health) / 100.0, 0.0, 1.0)
-		var segment := Rect2(center - 140 + i * (segment_width + 5), 82, segment_width, 5)
-		draw_rect(segment, Color(0.04, 0.075, 0.085, 0.9))
-		draw_rect(Rect2(segment.position, Vector2(segment_width * hp, 5)), Color("d68965"))
-		if guard.health <= 0 or guard.health >= 100:
-			continue
-		var marker: Vector3 = guard.global_position + Vector3.UP * 2.65
-		if arena.camera.is_position_behind(marker):
-			continue
-		var marker_pos: Vector2 = arena.camera.unproject_position(marker) + Vector2(-26, -12)
-		draw_rect(Rect2(marker_pos - Vector2(1, 1), Vector2(54, 5)), Color(0.025, 0.045, 0.058, 0.9))
-		draw_rect(Rect2(marker_pos, Vector2(52 * hp, 3)), Color("d8ad71"))
-	_center("存活 %02d / %02d" % [living_guards, guard_count], Vector2(center, 108), 12, MUTED)
-	# Two compact stance rows share the original corner; no extra equipment bar.
-	var ghost: bool = arena.player.ghost_active
-	var ghost_pending: bool = arena.player.ghost_requested != ghost
-	var combat_tint := Color("ff8cab") if ghost else GOLD
-	var storm := arena.get("storm") as Node3D
-	var storm_active := is_instance_valid(storm) and bool(storm.get("active"))
-	var storm_tint := Color("a4edf3") if storm_active else MUTED
-	var stance_card := Rect2(m, h - 285, 330, 134)
-	draw_style_box(_panel_style(Color(0.115, 0.042, 0.078, 0.85) if ghost else Color(0.045, 0.09, 0.115, 0.82)), stance_card)
-	_text("厉 鬼 解 放" if ghost else "常 态 连 斩", Vector2(m + 16, h - 260), 20, combat_tint)
-	var ghost_control := "G / B 切换"
-	if ghost_pending:
-		ghost_control = "收势后解放" if arena.player.ghost_requested else "收势后复原"
-	_right(ghost_control, Vector2(m + 310, h - 262), 12, combat_tint if ghost_pending else MUTED)
-	var ghost_stats := "5 式 8 击 · 伤害 +%d%% · 攻速 +%d%%" % [roundi((arena.player.damage_multiplier - 1.0) * 100.0), roundi((arena.player.attack_speed - 1.0) * 100.0)]
-	_text(ghost_stats if ghost else "3 式 3 击 · 按住普攻连续衔接", Vector2(m + 16, h - 239), 12, combat_tint if ghost else MUTED)
-	draw_line(Vector2(m + 16, h - 225), Vector2(m + 314, h - 225), Color(0.60, 0.65, 0.63, 0.2), 1)
-	var storm_icon := Vector2(m + 23, h - 205)
-	for i in range(3):
-		var offset := Vector2((i - 1) * 7, absf(i - 1) * 4)
-		draw_line(storm_icon + offset + Vector2(0, -7), storm_icon + offset + Vector2(0, 9), storm_tint, 1.5, true)
-		draw_line(storm_icon + offset + Vector2(-3, 4), storm_icon + offset + Vector2(3, 4), storm_tint, 1.2, true)
-	_text("万 剑 归 宗", Vector2(m + 44, h - 200), 18, storm_tint)
-	_right("已启" if storm_active else "收阵", Vector2(m + 310, h - 201), 13, storm_tint)
-	_text("L / Y 收放  ·  攻击时群体追击", Vector2(m + 16, h - 181), 12, MUTED)
-	_text("28% 引落流星", Vector2(m + 16, h - 163), 12, GOLD)
-	if is_instance_valid(storm):
-		_right("飞剑 %02d / 8" % int(storm.get("active_swords")), Vector2(m + 310, h - 163), 12, storm_tint)
-	draw_line(Vector2(m, h - 137), Vector2(w - m, h - 137), Color(0.60, 0.65, 0.63, 0.2), 1)
-	_key("W A S D", Vector2(m, h - 103), 91)
-	_text("移动", Vector2(m + 106, h - 82), 16, INK)
-	_text("方向键 / 左摇杆同样可用", Vector2(m, h - 47), 12, MUTED)
-	var state := "就绪"
-	var progress := 1.0
-	var combo_playing: bool = arena.player.attacking and not arena.player.using_skill
-	var combo_title := "厉鬼五连" if ghost else "普通三连"
-	var combo_detail := "5 式 / 8 击" if ghost else "3 式 / 3 击"
-	if combo_playing:
-		state = arena.player.get_attack_phase()
-		combo_title = arena.player.combo_label
-		combo_detail = "%d / %d 式 · %d 段" % [arena.player.combo_index + 1, arena.player.combo_total, arena.player.strike_total]
-		progress = clampf(arena.player.animation.current_animation_position / arena.player.move_duration, 0, 1)
-		for strike in range(arena.player.strike_total):
-			var segment_color := combat_tint if strike <= arena.player.strike_index else combat_tint.darkened(0.70)
-			draw_rect(Rect2(center - 30 - (arena.player.strike_total - strike) * 11, h - 119, 7, 4), segment_color)
-	_text(combo_detail, Vector2(center - 224, h - 111), 11, combat_tint)
-	var icon := Vector2(center - 270, h - 82)
-	var diamond := PackedVector2Array([icon + Vector2(0, -29), icon + Vector2(29, 0), icon + Vector2(0, 29), icon + Vector2(-29, 0), icon + Vector2(0, -29)])
-	draw_polyline(diamond, combat_tint.lerp(INK, hit_glow), 1.3, true)
-	draw_line(icon + Vector2(-9, 11), icon + Vector2(11, -12), INK, 3, true)
-	draw_line(icon + Vector2(-10, 1), icon + Vector2(1, 11), combat_tint, 2, true)
-	draw_line(icon + Vector2(9, -12), icon + Vector2(13, -15), INK, 2, true)
-	_text(combo_title, Vector2(center - 224, h - 88), 24, INK)
-	_text("按住 J / 左键 / X 连段", Vector2(center - 224, h - 62), 13, MUTED)
-	_right(state, Vector2(center - 30, h - 88), 13, TEAL if state == "就绪" else combat_tint)
-	draw_rect(Rect2(center - 224, h - 45, 194, 2), Color("23343a"))
-	draw_rect(Rect2(center - 224, h - 45, progress * 194, 2), combat_tint if combo_playing else TEAL.darkened(0.3))
-	var cooldown: float = arena.player.skill_cooldown
-	var skill_tint := Color("9becf0") if cooldown <= 0 else TEAL.darkened(0.25)
-	var skill_state := "就绪" if cooldown <= 0 else "%.1f s" % cooldown
-	if arena.player.using_skill:
-		var t: float = arena.player.animation.current_animation_position
-		skill_state = "聚势" if t < DuelFighter.SKILL_SWING else ("裂环" if t < 0.66 else "收势")
-		skill_tint = Color("bafcff")
-	var skill_icon := Vector2(center + 65, h - 82)
-	draw_arc(skill_icon, 26, -0.7, 2.4, 32, skill_tint, 2.0, true)
-	draw_arc(skill_icon, 21, 2.5, 5.5, 32, skill_tint, 1.4, true)
-	draw_line(skill_icon + Vector2(-13, 13), skill_icon + Vector2(12, -15), INK, 2.5, true)
-	draw_line(skill_icon + Vector2(-6, 6), skill_icon + Vector2(10, 9), skill_tint, 1.5, true)
-	_text("裂 环 斩", Vector2(center + 110, h - 88), 24, INK)
-	_text("K / 右键 / 手柄 RB", Vector2(center + 110, h - 62), 13, MUTED)
-	_right(skill_state, Vector2(center + 330, h - 88), 13, skill_tint)
-	draw_rect(Rect2(center + 110, h - 45, 220, 2), Color("23343a"))
-	draw_rect(Rect2(center + 110, h - 45, 220 * (1.0 - cooldown / DuelFighter.SKILL_COOLDOWN), 2), skill_tint)
-	_right("%02d" % arena.hit_count, Vector2(w - m, h - 85), 30, INK, DISPLAY)
-	_right("确认命中", Vector2(w - m - 56, h - 91), 13, MUTED)
-	_right("R  重置     Esc  暂停", Vector2(w - m, h - 48), 14, MUTED)
-	if notice_left > 0.0:
-		_center(notice, Vector2(center, h - 163), 15, Color(0.87, 0.83, 0.72, minf(notice_left, 0.9)))
-	for item in popups:
-		var p: Vector2 = arena.camera.unproject_position(item.point)
-		p.x += item.offset
-		p.y -= 20 + 54 * item.age
-		var alpha := 1.0 - smoothstep(0.45, 0.85, item.age)
-		var flying_sword: bool = item.source == "飞剑"
-		var meteor: bool = item.source == "流星"
-		var ghost_hit: bool = item.source == "厉鬼"
-		var tint := Color(0.65, 0.97, 1.0, alpha) if item.heavy else Color(1.0, 0.84, 0.54, alpha)
-		if meteor:
-			tint = Color(1.0, 0.75, 0.35, alpha)
-		elif ghost_hit:
-			tint = Color(1.0, 0.49, 0.66, alpha)
-		var damage_size := 20 if flying_sword else (34 if meteor else (38 if item.heavy else (33 if item.lethal else 29)))
-		_center(str(item.damage), p, damage_size, tint, DISPLAY)
-		if item.lethal or meteor or (item.heavy and not flying_sword):
-			var label := "击破" if item.lethal else ("流星" if meteor else ("厉鬼裂环" if ghost_hit else "裂环斩"))
-			_center(label, p + Vector2(0, 19 if flying_sword else 26), 13 if flying_sword else 15, tint)
-
-func _text(value: String, pos: Vector2, font_size: int, color: Color, font: Font = FONT) -> void:
-	draw_string(font, pos, value, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, color)
-
-func _right(value: String, pos: Vector2, font_size: int, color: Color, font: Font = FONT) -> void:
-	_text(value, pos - Vector2(font.get_string_size(value, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x, 0), font_size, color, font)
-
-func _center(value: String, pos: Vector2, font_size: int, color: Color, font: Font = FONT) -> void:
-	_text(value, pos - Vector2(font.get_string_size(value, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x * 0.5, 0), font_size, color, font)
-
-func _key(value: String, pos: Vector2, width: float) -> void:
-	draw_style_box(_panel_style(Color(0.075, 0.115, 0.135, 0.85)), Rect2(pos, Vector2(width, 29)))
-	_center(value, pos + Vector2(width * 0.5, 20), 12, INK)
-
-func _panel_style(color: Color) -> StyleBoxFlat:
-	var style := StyleBoxFlat.new()
-	style.bg_color = color
-	style.border_color = Color("536165")
-	style.set_border_width_all(1)
-	style.set_corner_radius_all(3)
-	style.content_margin_top = 12
-	style.content_margin_bottom = 12
-	style.content_margin_left = 24
-	style.content_margin_right = 24
-	return style
-
-func _build_pause() -> void:
-	pause_panel = Control.new()
-	pause_panel.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	add_child(pause_panel)
-	var background := ColorRect.new()
-	background.color = Color(0.025, 0.045, 0.058, 0.94)
-	background.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	pause_panel.add_child(background)
-	var center := CenterContainer.new()
-	center.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	pause_panel.add_child(center)
-	var column := VBoxContainer.new()
-	column.custom_minimum_size = Vector2(370, 0)
-	column.add_theme_constant_override("separation", 18)
-	center.add_child(column)
-	var pause_theme := Theme.new()
-	pause_theme.default_font = FONT
-	pause_theme.default_font_size = 17
-	column.theme = pause_theme
-	var title := Label.new()
-	title.text = "片刻休整"
-	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	title.add_theme_font_size_override("font_size", 32)
-	column.add_child(title)
-	var subtitle := Label.new()
-	subtitle.text = "EMBER YARD  /  近战试炼"
-	subtitle.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	subtitle.modulate = MUTED
-	column.add_child(subtitle)
-	pause_button = _button(column, "继续试炼", toggle_pause)
-	_button(column, "重置场景", func() -> void: arena.restart())
-	var frame_row := HBoxContainer.new()
-	column.add_child(frame_row)
-	var frame_label := Label.new()
-	frame_label.text = "帧率上限"
-	frame_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	frame_row.add_child(frame_label)
-	frame_select = OptionButton.new()
-	frame_select.add_item("60 FPS", 60)
-	frame_select.add_item("120 FPS", 120)
-	frame_select.select(1)
-	frame_select.custom_minimum_size.x = 150
-	frame_select.item_selected.connect(func(index: int) -> void: arena.set_frame_limit(frame_select.get_item_id(index), true))
-	frame_row.add_child(frame_select)
-	var shake := CheckButton.new()
-	shake.text = "镜头震动与冲击推近"
-	shake.button_pressed = true
-	shake.toggled.connect(func(enabled: bool) -> void: arena.shake_enabled = enabled)
-	column.add_child(shake)
-	var mute := CheckButton.new()
-	mute.text = "静音"
-	mute.toggled.connect(func(enabled: bool) -> void: AudioServer.set_bus_mute(0, enabled))
-	column.add_child(mute)
-	var help := Label.new()
-	help.text = "WASD / 左摇杆  移动\n按住 J / 左键 / X  连段    K / 右键 / RB  裂环斩\nG / 手柄 B  厉鬼：五式八击 · 伤害与攻速提升\nL / 手柄 Y  收放万剑归宗 · 攻击时群体追击\n攻击有 28% 概率引落流星\nR  重置    F11  全屏"
-	help.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	help.add_theme_font_size_override("font_size", 13)
-	help.modulate = MUTED
-	column.add_child(help)
+	_popup_sequence = 0
+	notice = ""
+	notice_left = 0.0
+	_choice_submitted = false
 	pause_panel.hide()
+	choice_panel.hide()
+	result_panel.hide()
+	_release_focus()
+	_refresh_left = 0.0
+	queue_redraw()
+
 
 func sync_frame_limit(fps: int) -> void:
 	if is_instance_valid(frame_select):
 		frame_select.select(0 if fps == 60 else 1)
 
-func _button(parent: Control, title: String, callback: Callable) -> Button:
+
+func hit(point: Vector3, lethal: bool, damage: int, heavy: bool, source: String = "") -> void:
+	if popups.size() >= MAX_POPUPS:
+		popups.pop_front()
+	_popup_sequence += 1
+	popups.append({"point": point + Vector3.UP * 1.7, "age": 0.0, "lethal": lethal, "damage": damage, "heavy": heavy, "source": source, "offset": float(_popup_sequence % 5 - 2) * 9.0})
+
+
+func _draw() -> void:
+	if not is_instance_valid(arena) or not is_instance_valid(arena.camera):
+		return
+	for item in popups:
+		if arena.camera.is_position_behind(item.point):
+			continue
+		var point: Vector2 = arena.camera.unproject_position(item.point)
+		point += Vector2(item.offset, -40.0 * item.age)
+		if not Rect2(Vector2.ZERO, size).grow(30.0).has_point(point):
+			continue
+		var alpha := 1.0 - smoothstep(0.32, POPUP_LIFETIME, float(item.age))
+		var color := GOLD if item.lethal else (TEAL if item.heavy else INK)
+		if item.source == "厉鬼":
+			color = Color("ec9ab0")
+		elif item.source in ["受伤", "敌人"]:
+			color = RED
+		color.a = alpha
+		var font_size := 25 if item.lethal else (23 if item.heavy else 19)
+		var value := str(item.damage)
+		var font: Font = DISPLAY
+		if item.source == "闪避":
+			value = "闪避"
+			font = FONT
+			font_size = 16
+		var position_2d := point - Vector2(font.get_string_size(value, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size).x * 0.5, 0)
+		draw_string_outline(font, position_2d, value, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, 3, Color(0.025, 0.04, 0.05, alpha * 0.9))
+		draw_string(font, position_2d, value, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, color)
+
+
+func _build_gameplay() -> void:
+	_base = MarginContainer.new()
+	_base.name = "GameplayHUD"
+	_base.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(_base)
+	_base.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	var column := _column(_base, 8)
+	var top := HBoxContainer.new()
+	top.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	top.add_theme_constant_override("separation", 10)
+	column.add_child(top)
+	var vitals := _panel(top)
+	vitals.custom_minimum_size.x = 252
+	var vitals_column := _column(vitals, 4)
+	var title_row := HBoxContainer.new()
+	title_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	vitals_column.add_child(title_row)
+	_label(title_row, "剑 豪", 21, GOLD).size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_level = _label(title_row, "Lv.01", 17, INK)
+	_health = _bar(vitals_column, RED, 8)
+	_health_text = _label(vitals_column, "100 / 100", 12, MUTED)
+	_experience = _bar(vitals_column, TEAL, 4)
+	_experience_text = _label(vitals_column, "经验  0 / 1", 11, MUTED)
+	var spacer := Control.new()
+	spacer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	top.add_child(spacer)
+	var run_panel := _panel(top)
+	run_panel.custom_minimum_size.x = 210
+	run_panel.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
+	var run_column := _column(run_panel, 4)
+	_time_label = _label(run_column, "00:00 / 10:00", 22, INK)
+	_time_label.add_theme_font_override("font", DISPLAY)
+	_phase = _label(run_column, "余烬初醒", 14, GOLD)
+	_counts = _label(run_column, "击杀 0  ·  场上 0", 12, MUTED)
+	var pause_control := _button(top, "暂停\nEsc", func() -> void: pause_requested.emit())
+	pause_control.custom_minimum_size = Vector2(60, 54)
+	pause_control.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
+	pause_control.focus_mode = Control.FOCUS_NONE
+	var boss_center := CenterContainer.new()
+	boss_center.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	column.add_child(boss_center)
+	_boss_panel = _panel(boss_center)
+	_boss_panel.custom_minimum_size.x = 410
+	var boss_column := _column(_boss_panel, 4)
+	_boss_text = _label(boss_column, "终局首领", 13, RED, HORIZONTAL_ALIGNMENT_CENTER)
+	_boss_health = _bar(boss_column, RED, 6)
+	_boss_panel.hide()
+	var space := Control.new()
+	space.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	space.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	column.add_child(space)
+	_notice_label = _label(column, "", 15, GOLD, HORIZONTAL_ALIGNMENT_CENTER)
+	var skill_center := CenterContainer.new()
+	skill_center.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	column.add_child(skill_center)
+	_skill_row = HBoxContainer.new()
+	_skill_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_skill_row.add_theme_constant_override("separation", 8)
+	skill_center.add_child(_skill_row)
+	_make_skill("ring", "裂环斩", "K / 右键 / RB")
+	_make_skill("ghost", "厉鬼", "G / B")
+	_make_skill("swords", "万剑归宗", "被动")
+	_make_skill("meteor", "流星", "被动")
+	_hint = _label(column, "WASD / 左摇杆移动  ·  自动攻击  ·  击杀拾取经验，升级选择成长", 12, MUTED, HORIZONTAL_ALIGNMENT_CENTER)
+
+
+func _make_skill(id: String, title: String, key: String) -> void:
+	var panel := _panel(_skill_row)
+	panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	var column := _column(panel, 3)
+	var key_label := _label(column, key, 11, MUTED)
+	key_label.name = "Binding"
+	var title_label := _label(column, title, 16, INK)
+	var status := _label(column, "升级时可领悟", 12, MUTED)
+	var bar := _bar(column, TEAL if id != "ghost" else GOLD, 3)
+	_skill_widgets[id] = {"title": title_label, "status": status, "bar": bar}
+
+
+func _build_pause() -> void:
+	var modal := _modal("PauseMenu", 684)
+	pause_panel = modal.overlay
+	var column: VBoxContainer = modal.column
+	_label(column, "片刻休整", 29, INK)
+	_label(column, "剑豪 · 本局修行", 13, GOLD)
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 28)
+	column.add_child(row)
+	var controls := _column(row, 10)
+	controls.custom_minimum_size.x = 270
+	pause_button = _button(controls, "继续战斗", func() -> void: pause_requested.emit())
+	_button(controls, "重新开始", func() -> void: restart_requested.emit())
+	var frame_row := HBoxContainer.new()
+	controls.add_child(frame_row)
+	_label(frame_row, "帧率上限", 15, MUTED).size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	frame_select = OptionButton.new()
+	frame_select.add_item("60 FPS", 60)
+	frame_select.add_item("120 FPS", 120)
+	frame_select.select(1)
+	frame_select.custom_minimum_size = Vector2(126, 38)
+	frame_select.item_selected.connect(func(index: int) -> void: frame_limit_requested.emit(frame_select.get_item_id(index)))
+	frame_row.add_child(frame_select)
+	_shake = CheckButton.new()
+	_shake.text = "镜头震动"
+	_shake.button_pressed = true
+	_shake.toggled.connect(func(enabled: bool) -> void: shake_changed.emit(enabled))
+	controls.add_child(_shake)
+	_mute = CheckButton.new()
+	_mute.text = "静音"
+	_mute.toggled.connect(func(enabled: bool) -> void: AudioServer.set_bus_mute(0, enabled))
+	controls.add_child(_mute)
+	_label(controls, "Esc / Start  继续\nR  重开    F11  全屏", 12, MUTED)
+	var attributes := _column(row, 6)
+	attributes.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_label(attributes, "当前属性", 16, GOLD)
+	_stat_text = _label(attributes, "", 14, INK)
+	_stat_text.add_theme_constant_override("line_spacing", 5)
+	pause_panel.hide()
+
+
+func _build_choices() -> void:
+	var modal := _modal("UpgradeSelection", 860)
+	choice_panel = modal.overlay
+	_choice_box = modal.panel
+	var column: VBoxContainer = modal.column
+	_choice_title = _label(column, "破境 · 三选一", 30, GOLD, HORIZONTAL_ALIGNMENT_CENTER)
+	_choice_subtitle = _label(column, "选择一项成长", 14, MUTED, HORIZONTAL_ALIGNMENT_CENTER)
+	var cards := HBoxContainer.new()
+	cards.name = "Cards"
+	cards.add_theme_constant_override("separation", 12)
+	column.add_child(cards)
+	for i in 3:
+		var button := _button(cards, "", _choose.bind(i))
+		button.name = "Choice%d" % (i + 1)
+		button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		button.custom_minimum_size = Vector2(0, 238)
+		var margins := MarginContainer.new()
+		margins.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		button.add_child(margins)
+		margins.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		for side in ["left", "top", "right", "bottom"]:
+			margins.add_theme_constant_override("margin_" + side, 17)
+		var content := _column(margins, 14)
+		var category := _label(content, "", 12, TEAL)
+		var title := _label(content, "", 22, INK)
+		title.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		var description := _label(content, "", 15, MUTED)
+		description.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		description.size_flags_vertical = Control.SIZE_EXPAND_FILL
+		_label(content, "选择此项  →", 13, GOLD)
+		_choice_buttons.append(button)
+		_choice_labels.append({"category": category, "title": title, "description": description})
+	_label(column, "1 / 2 / 3 选择  ·  方向键 / 十字键切换  ·  Enter / A 确认", 12, MUTED, HORIZONTAL_ALIGNMENT_CENTER)
+	choice_panel.hide()
+
+
+func _build_result() -> void:
+	var modal := _modal("RunResult", 480)
+	result_panel = modal.overlay
+	var column: VBoxContainer = modal.column
+	_label(column, "烬 庭  /  剑 豪", 13, GOLD, HORIZONTAL_ALIGNMENT_CENTER)
+	_result_title = _label(column, "破阵而归", 38, GOLD, HORIZONTAL_ALIGNMENT_CENTER)
+	_result_description = _label(column, "", 15, MUTED, HORIZONTAL_ALIGNMENT_CENTER)
+	_result_summary = _label(column, "", 19, INK, HORIZONTAL_ALIGNMENT_CENTER)
+	_result_summary.add_theme_constant_override("line_spacing", 9)
+	_result_button = _button(column, "再战一局", func() -> void: restart_requested.emit())
+	_label(column, "R 重新开始", 12, MUTED, HORIZONTAL_ALIGNMENT_CENTER)
+	result_panel.hide()
+
+
+func _modal(title: String, width: float) -> Dictionary:
+	var overlay := Control.new()
+	overlay.name = title
+	overlay.mouse_filter = Control.MOUSE_FILTER_STOP
+	add_child(overlay)
+	overlay.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	var veil := ColorRect.new()
+	veil.color = Color(0.025, 0.04, 0.055, 0.88)
+	veil.mouse_filter = Control.MOUSE_FILTER_STOP
+	overlay.add_child(veil)
+	veil.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	var center := CenterContainer.new()
+	center.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	overlay.add_child(center)
+	center.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	var panel := PanelContainer.new()
+	panel.custom_minimum_size.x = width
+	panel.mouse_filter = Control.MOUSE_FILTER_STOP
+	panel.add_theme_stylebox_override("panel", _style(Color("13242c"), Color("50616a"), 24))
+	center.add_child(panel)
+	var column := _column(panel, 15)
+	return {"overlay": overlay, "panel": panel, "column": column}
+
+
+func _fit_layout() -> void:
+	if not is_instance_valid(_base):
+		return
+	var margin := 14 if size.x < 1100.0 else 22
+	for side in ["left", "top", "right", "bottom"]:
+		_base.add_theme_constant_override("margin_" + side, margin)
+	_skill_row.custom_minimum_size.x = minf(900.0, maxf(0.0, size.x - margin * 2.0))
+	_choice_box.custom_minimum_size.x = minf(1020.0, maxf(0.0, size.x - 56.0))
+	for button in _choice_buttons:
+		button.custom_minimum_size.y = 238.0 if size.y >= 680.0 else 218.0
+
+
+func _panel(parent: Node) -> PanelContainer:
+	var panel := PanelContainer.new()
+	panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	panel.add_theme_stylebox_override("panel", _style(Color(0.035, 0.065, 0.079, 0.85), Color(0.30, 0.39, 0.42, 0.55), 11))
+	parent.add_child(panel)
+	return panel
+
+
+func _column(parent: Node, separation: int) -> VBoxContainer:
+	var column := VBoxContainer.new()
+	column.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	column.add_theme_constant_override("separation", separation)
+	parent.add_child(column)
+	return column
+
+
+func _label(parent: Node, value: String, font_size: int, color: Color, alignment := HORIZONTAL_ALIGNMENT_LEFT) -> Label:
+	var label := Label.new()
+	label.text = value
+	label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	label.add_theme_font_size_override("font_size", font_size)
+	label.add_theme_color_override("font_color", color)
+	label.horizontal_alignment = alignment
+	parent.add_child(label)
+	return label
+
+
+func _bar(parent: Node, color: Color, height: float) -> ProgressBar:
+	var bar := ProgressBar.new()
+	bar.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	bar.show_percentage = false
+	bar.min_value = 0.0
+	bar.max_value = 1.0
+	bar.step = 0.0
+	bar.custom_minimum_size.y = height
+	bar.add_theme_stylebox_override("background", _style(Color("22343c"), Color.TRANSPARENT, 0))
+	bar.add_theme_stylebox_override("fill", _style(color, Color.TRANSPARENT, 0))
+	parent.add_child(bar)
+	return bar
+
+
+func _button(parent: Node, title: String, callback: Callable) -> Button:
 	var button := Button.new()
 	button.text = title
-	button.add_theme_stylebox_override("normal", _panel_style(Color("172a32")))
-	button.add_theme_stylebox_override("hover", _panel_style(Color("29404a")))
-	button.add_theme_stylebox_override("focus", _panel_style(Color("304951")))
-	button.add_theme_stylebox_override("pressed", _panel_style(Color("304951")))
+	button.mouse_filter = Control.MOUSE_FILTER_STOP
+	button.custom_minimum_size.y = 42
+	button.add_theme_color_override("font_color", INK)
+	button.add_theme_color_override("font_hover_color", INK)
+	button.add_theme_color_override("font_pressed_color", GOLD)
+	button.add_theme_stylebox_override("normal", _style(Color("1a303a"), Color("48606a"), 10))
+	button.add_theme_stylebox_override("hover", _style(Color("29444d"), TEAL.darkened(0.25), 10))
+	button.add_theme_stylebox_override("pressed", _style(Color("304b53"), GOLD, 10))
+	button.add_theme_stylebox_override("focus", _style(Color(0, 0, 0, 0), GOLD, 10, 2))
 	button.pressed.connect(callback)
 	parent.add_child(button)
 	return button
+
+
+func _style(fill: Color, border: Color, padding: int, border_width := 1) -> StyleBoxFlat:
+	var style := StyleBoxFlat.new()
+	style.bg_color = fill
+	style.border_color = border
+	style.set_border_width_all(border_width if border.a > 0.0 else 0)
+	style.set_corner_radius_all(5)
+	style.content_margin_left = padding
+	style.content_margin_right = padding
+	style.content_margin_top = padding
+	style.content_margin_bottom = padding
+	return style
+
+
+func _release_focus() -> void:
+	var focused := get_viewport().gui_get_focus_owner()
+	if is_instance_valid(focused):
+		focused.release_focus()
+
+
+func _clock(seconds: float) -> String:
+	var whole := maxi(0, floori(seconds))
+	return "%02d:%02d" % [whole / 60, whole % 60]

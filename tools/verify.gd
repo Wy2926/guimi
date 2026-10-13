@@ -1,58 +1,79 @@
 extends Node
-## Run the actual scene with -- --verify. Artifacts are generated, never shipped.
+## Uses the actual scene and native physics. -- --verify --fps=60 --perf-enemies=80
+
+const ENEMY_SCENE = preload("res://scenes/enemy.tscn")
 
 var scene: Node3D
-var failures: Array[String] = []
 var checks: Array[String] = []
-var frame_times: Array[float] = []
-var record_frames := false
-var headless := false
-var wall_times: Array[float] = []
-var last_frame_us := 0
-var first_contact_ms := -1
-var attack_started_ms := 0
-var skill_started_ms := 0
-var first_skill_contact_ms := -1
-var max_draw_calls := 0
+var failures: Array[String] = []
+var captures: Array[String] = []
 var requested_fps := 120
+var performance_enemies := 0
+var headless := false
+var started_ms := 0
+var recording := false
+var last_frame_us := 0
+var wall_frame_ms: Array[float] = []
+var simulation_frame_ms: Array[float] = []
+var max_draw_calls := 0
+var max_nodes := 0
 var max_active_swords := 0
 var max_active_meteors := 0
-var normal_combo_damage := 0
-var ghost_combo_damage := 0
-var normal_combo_wall_ms := 0
-var ghost_combo_wall_ms := 0
+var performance: Dictionary = {"requested": false}
 
 func _ready() -> void:
+	process_mode = Node.PROCESS_MODE_ALWAYS
 	scene = get_parent()
 	headless = DisplayServer.get_name() == "headless"
-	requested_fps = 60 if "--fps60" in OS.get_cmdline_user_args() else 120
-	scene.set_frame_limit(requested_fps)
+	started_ms = Time.get_ticks_msec()
+	for argument: String in OS.get_cmdline_user_args():
+		if argument == "--fps60":
+			requested_fps = 60
+		elif argument.begins_with("--fps="):
+			requested_fps = 60 if argument.get_slice("=", 1).to_int() == 60 else 120
+		elif argument.begins_with("--perf-enemies="):
+			performance_enemies = clampi(argument.get_slice("=", 1).to_int(), 1, 160)
 	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path("res://artifacts"))
-	call_deferred("showcase" if "--showcase" in OS.get_cmdline_user_args() else "run")
+	call_deferred("run")
 
 func _process(delta: float) -> void:
-	var now := Time.get_ticks_usec()
-	if record_frames:
-		frame_times.append(delta * 1000.0)
-		if last_frame_us > 0:
-			wall_times.append(float(now - last_frame_us) / 1000.0)
-		max_draw_calls = maxi(max_draw_calls, int(Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME)))
-		max_active_swords = maxi(max_active_swords, scene.storm.active_swords)
-		max_active_meteors = maxi(max_active_meteors, scene.storm.meteors.size())
-	last_frame_us = now
-
-func wait(seconds: float) -> void:
-	await get_tree().create_timer(seconds).timeout
-
-func capture(label: String) -> void:
-	if headless:
+	if not recording:
 		return
-	await RenderingServer.frame_post_draw
-	get_viewport().get_texture().get_image().save_png("res://artifacts/%s.png" % label)
+	var now := Time.get_ticks_usec()
+	if last_frame_us > 0:
+		wall_frame_ms.append(float(now - last_frame_us) / 1000.0)
+	last_frame_us = now
+	simulation_frame_ms.append(delta * 1000.0)
+	max_draw_calls = maxi(max_draw_calls, int(Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME)))
+	max_nodes = maxi(max_nodes, int(Performance.get_monitor(Performance.OBJECT_NODE_COUNT)))
+	max_active_swords = maxi(max_active_swords, scene.storm.active_swords)
+	max_active_meteors = maxi(max_active_meteors, scene.storm.meteors.size())
 
 func check(condition: bool, message: String) -> void:
 	(checks if condition else failures).append(message)
 	print(("PASS " if condition else "FAIL "), message)
+
+func physics_wait(seconds: float) -> void:
+	for frame in maxi(1, ceili(seconds * Engine.physics_ticks_per_second)):
+		await get_tree().physics_frame
+
+func until(predicate: Callable, seconds: float) -> bool:
+	for frame in maxi(1, ceili(seconds * Engine.physics_ticks_per_second)):
+		if bool(predicate.call()):
+			return true
+		await get_tree().physics_frame
+	return bool(predicate.call())
+
+func capture(label: String) -> void:
+	if headless:
+		return
+	await get_tree().process_frame
+	await RenderingServer.frame_post_draw
+	var file := "res://artifacts/roguelite-%s-%dfps.png" % [label, requested_fps]
+	var error := get_viewport().get_texture().get_image().save_png(file)
+	check(error == OK, "Screenshot saved: " + label)
+	if error == OK:
+		captures.append(file)
 
 func press(action: String) -> void:
 	var event := InputEventAction.new()
@@ -64,858 +85,617 @@ func press(action: String) -> void:
 	event.pressed = false
 	Input.parse_input_event(event)
 
-func pair() -> void:
+func release_movement() -> void:
+	for action: String in ["move_left", "move_right", "move_up", "move_down"]:
+		Input.action_release(action)
+
+func prepare(automatic := false) -> void:
+	release_movement()
 	scene.restart()
-	scene.storm.set_active(false)
-	scene.enemy.process_mode = Node.PROCESS_MODE_INHERIT
-	scene.enemy.set_physics_process(true)
-	scene.enemy.show()
-	# Keep the original single-target regression independent of auxiliary damage.
-	for guard in scene.guards:
-		if guard == scene.enemy:
-			continue
-		guard.process_mode = Node.PROCESS_MODE_DISABLED
-		guard.hide()
-		guard.collision_layer = 0
-	scene.player.position = Vector3(-0.95, 0.02, 0.5)
-	scene.enemy.position = Vector3(0.95, 0.02, -0.5)
-	scene.enemy.return_delay = 99.0
+	scene.director.enabled = false
+	scene.director._spawn_timer.stop()
+	scene.player.auto_attack = automatic
+	scene.player.stats.crit_chance = 0.0
+	scene.storm.active = true
+	scene.storm.meteor_chance = 0.28
+	await physics_wait(0.04)
+
+func enemy_at(point: Vector3, health := 500.0, kind := "chaser", moving := false) -> ArenaEnemy:
+	var enemy := ENEMY_SCENE.instantiate() as ArenaEnemy
+	enemy.configure(kind, 0, 0)
+	enemy.target = scene.player
+	enemy.camera = scene.camera
+	enemy.arena_radius = scene.player.arena_radius
+	enemy.position = point
+	scene.director.enemy_container.add_child(enemy)
+	scene.director._alive.append(enemy)
+	enemy.defeated.connect(scene.director._on_defeated)
+	enemy.tree_exited.connect(scene.director._on_enemy_exited.bind(enemy))
+	enemy.stats.max_health = health
+	enemy.health = health
+	enemy.stats.physical_defense = 0.0
+	enemy.stats.magic_defense = 0.0
+	enemy.stats.crit_chance = 0.0
+	enemy.stats.dodge_chance = 0.0
+	enemy.set_physics_process(moving)
+	enemy.defeated.connect(scene._on_enemy_defeated)
+	return enemy
 
 func run() -> void:
-	await wait(2.0)
-	pair()
-	check_outfit()
-	check(scene.hud.frame_select.item_count == 2 and scene.hud.frame_select.get_item_id(0) == 60 and scene.hud.frame_select.get_item_id(1) == 120, "Frame selector offers exactly 60 and 120 FPS")
+	var deadline := Time.get_ticks_msec() + 30000
+	while scene.state != "playing" and Time.get_ticks_msec() < deadline:
+		await get_tree().process_frame
+	check(scene.state == "playing" and scene.ready_to_play, "The real main scene reaches playing after startup")
+	if scene.state != "playing":
+		finish_report()
+		return
+	scene.set_frame_limit(requested_fps)
+	check(scene.player.progression == scene.progression and scene.storm.player == scene.player and scene.storm.progression == scene.progression and scene.storm.feedback == scene.feedback and scene.storm.camera == scene.camera, "Combat dependencies are explicitly supplied by the scene")
+	check(scene.camera.projection == Camera3D.PROJECTION_ORTHOGONAL, "The game uses an orthographic 2.5D view")
+	var pitch := rad_to_deg(asin(clampf(scene.camera.global_basis.z.y, -1.0, 1.0)))
+	check(pitch >= 55.0 and pitch <= 65.0, "Camera elevation is between 55 and 65 degrees")
+	check(scene.hud.frame_select.item_count == 2, "The native frame selector has two choices")
 	scene.set_frame_limit(60)
-	check(Engine.max_fps == 60 and scene.hud.frame_select.selected == 0, "60 FPS selection updates the native limiter and UI")
+	check(Engine.max_fps == 60 and scene.hud.frame_select.selected == 0, "60 FPS selection updates the limiter and HUD")
 	scene.set_frame_limit(120)
-	check(Engine.max_fps == 120 and scene.hud.frame_select.selected == 1, "120 FPS selection updates the native limiter and UI")
+	check(Engine.max_fps == 120 and scene.hud.frame_select.selected == 1, "120 FPS selection updates the limiter and HUD")
 	scene.set_frame_limit(requested_fps)
-	if "--layout-check" in OS.get_cmdline_user_args() and not headless:
-		DisplayServer.window_set_size(Vector2i(960, 600))
-		await wait(0.3)
-		await capture("07-small-960x600")
-		DisplayServer.window_set_size(Vector2i(1280, 720))
-		await wait(0.3)
-		await capture("08-wide-1280x720")
-		DisplayServer.window_set_size(Vector2i(1440, 900))
-		await wait(0.3)
-	var left_event := InputEventKey.new()
-	left_event.physical_keycode = KEY_LEFT
-	var right_event := InputEventKey.new()
-	right_event.physical_keycode = KEY_RIGHT
-	check(left_event.is_action("move_left") and right_event.is_action("move_right"), "Physical arrow keys map to the correct directions")
-	var key_event := InputEventKey.new()
-	key_event.physical_keycode = KEY_J
-	key_event.pressed = true
-	Input.parse_input_event(key_event)
-	await get_tree().physics_frame
-	check(scene.player.attacking, "Physical J key starts the attack through InputMap")
-	key_event.pressed = false
-	Input.parse_input_event(key_event)
-	await wait(0.8)
-	pair()
-	var mouse_event := InputEventMouseButton.new()
-	mouse_event.button_index = MOUSE_BUTTON_LEFT
-	mouse_event.pressed = true
-	Input.parse_input_event(mouse_event)
-	await get_tree().physics_frame
-	check(scene.player.attacking, "Left mouse button starts the attack through InputMap")
-	mouse_event.pressed = false
-	Input.parse_input_event(mouse_event)
-	await wait(0.8)
-	pair()
-	await wait(0.1)
-	await capture("01-arena")
-	# Measure first-contact wall time without blocking screenshot readback in the swing.
-	pair()
-	await wait(0.15)
-	scene.player.hit_confirmed.connect(func(_target: DuelFighter, _point: Vector3, _lethal: bool, _damage: int, heavy: bool) -> void:
-		if first_contact_ms < 0 and not heavy:
-			first_contact_ms = Time.get_ticks_msec() - attack_started_ms
-		if first_skill_contact_ms < 0 and heavy and skill_started_ms > 0:
-			first_skill_contact_ms = Time.get_ticks_msec() - skill_started_ms)
-	attack_started_ms = Time.get_ticks_msec()
-	press("attack")
-	await wait(0.9)
-	check(first_contact_ms > 0 and first_contact_ms < 280, "First real contact arrives within 280 ms")
-	pair()
-	await wait(0.15)
-	var started := Time.get_ticks_msec()
-	press("attack")
-	await get_tree().physics_frame
-	check(scene.player.attacking, "J/action starts the first normal-combo attack immediately")
-	await wait(0.12)
-	check(scene.enemy.health == 100, "Windup cannot deal damage")
-	await capture("02-windup")
-	await wait(0.095)
-	await capture("03-impact")
-	print("CONTACT_SNAPSHOT_MS ", Time.get_ticks_msec() - started)
-	await wait(0.16)
-	await capture("04-follow-through")
-	await wait(0.6)
-	check(scene.enemy.health == 75 and scene.hit_count == 1, "One swing = exactly one 25-damage hit")
-	check(not scene.player.attacking and scene.player.freeze_left == 0, "Attack and hit-stop recover without a stuck state")
-	check(scene.enemy.position.distance_to(Vector3(0.95, 0.02, -0.5)) > 0.2, "Hit physically displaces the target")
-	pair()
-	scene.player.position = Vector3(-4, 0.02, 0)
-	scene.enemy.position = Vector3(4, 0.02, 0)
-	await wait(0.1)
-	press("attack")
-	await wait(0.8)
-	check(scene.enemy.health == 100 and scene.hit_count == 0, "Out-of-range swing has no damage or hit confirmation")
-	pair()
-	await wait(0.1)
-	press("attack")
-	await wait(0.06)
-	scene.enemy.position = scene.player.position - scene.player.attack_direction * 1.8
-	await wait(0.8)
-	check(scene.enemy.health == 100, "Enemy behind the attacker is not hit")
-	pair()
-	await wait(0.1)
+	await physics_wait(2.0)
+	await capture("playing")
+	check_damage_rules()
+	check_progression()
+	await check_automatic_combat()
+	await check_active_skills()
+	await check_incoming_damage()
+	await check_pickups_and_choices()
+	await check_pause()
+	await check_auxiliary_skills()
+	await check_crowd_hits()
+	await check_restart()
+	await check_waves_and_endings()
+	if performance_enemies > 0:
+		await check_short_load()
+	finish_report()
+
+func check_damage_rules() -> void:
+	var attacker := BattleStats.new()
+	var defender := BattleStats.new()
+	attacker.physical_attack = 100.0
+	attacker.magic_attack = 200.0
+	attacker.independent_attack = 300.0
+	attacker.crit_chance = 0.5
+	attacker.crit_multiplier = 2.0
+	defender.physical_defense = 100.0
+	defender.magic_defense = 300.0
+	check(DamageRules.calculate(attacker, defender, 0, 1.0, 0, 1.0, 1.0).damage == 50, "Physical damage reads physical attack and physical defense only")
+	check(DamageRules.calculate(attacker, defender, 1, 1.0, 0, 1.0, 1.0).damage == 50, "Magical damage reads magic attack and magic defense only")
+	check(DamageRules.calculate(attacker, defender, 2, 1.0, 0, 1.0, 1.0).damage == 300, "Fixed damage reads independent attack")
+	defender.physical_defense = 10000.0
+	defender.magic_defense = 10000.0
+	check(DamageRules.calculate(attacker, defender, 2, 1.0, 0, 1.0, 1.0).damage == 300, "Increasing either defense does not reduce fixed damage")
+	attacker.element = DamageRules.Element.FIRE
+	attacker.element_bonus[0] = 0.2
+	defender.resistances[0] = 0.35
+	check(DamageRules.calculate(attacker, defender, 2, 1.0, -1, 1.0, 1.0).damage == 255, "Fixed damage still uses the inherited element and resistance")
+	check(DamageRules.calculate(attacker, defender, 2, 1.0, -1, 0.0, 1.0).damage == 510, "Element-adjusted fixed damage can critically strike")
+	check(DamageRules.calculate(attacker, defender, 2, 1.0, 0, 1.0, 1.0).damage == 300, "Explicit no-element damage does not use elemental modifiers")
+	defender.dodge_chance = 0.5
+	var evade := DamageRules.calculate(attacker, defender, 2, 1.0, -1, 0.0, 0.0)
+	check(evade.damage == 0 and evade.dodged and not evade.critical, "Fixed damage respects evasion without a phantom critical hit")
+	defender.resistances[0] = -10.0
+	check(DamageRules.calculate(attacker, defender, 2, 1.0, 1, 1.0, 1.0).damage == 900, "Elemental amplification is capped at three times")
+	defender.resistances[0] = 10.0
+	check(DamageRules.calculate(attacker, defender, 2, 1.0, 1, 1.0, 1.0).damage == 45, "Elemental resistance cannot reduce a hit below the 15 percent multiplier")
+
+func check_progression() -> void:
+	var first := RunProgression.new()
+	var second := RunProgression.new()
+	first.reset()
+	second.reset()
+	first.stats.physical_attack = 99.0
+	first.stats.element_bonus[0] = 0.8
+	check(second.stats.physical_attack == 25.0 and first.base_stats.physical_attack == 25.0 and second.stats.element_bonus[0] == 0.0 and first.base_stats.element_bonus[0] == 0.0, "Each run deep-copies stats and elemental arrays without changing its starting Resource")
+	first.reset()
+	var ids: Array[String] = []
+	for option: Dictionary in first._available_choices():
+		ids.append(option.id)
+	check(ids.has("physical_attack") and not ids.has("magic_attack") and not ids.has("independent_attack"), "The starting swordmaster offers physical attack and excludes attacks with no unlocked beneficiary")
+	first.skills.meteor = 1
+	first.skills.swords = 1
+	ids.clear()
+	for option: Dictionary in first._available_choices():
+		ids.append(option.id)
+	check(ids.has("magic_attack") and ids.has("independent_attack"), "Unlocking meteor and swords enables their matching attack upgrades")
+	first.skills.slash = 5
+	ids.clear()
+	for option: Dictionary in first._available_choices():
+		ids.append(option.id)
+	check(not ids.has("skill_slash"), "A max-level skill cannot appear in the choice pool")
+	var alias_skill := SkillDefinition.new()
+	alias_skill.id = "arcane_wave"
+	alias_skill.kind = DamageRules.Kind.MAGICAL
+	alias_skill.coefficient = 1.0
+	var harmless_stance := SkillDefinition.new()
+	harmless_stance.id = "harmless_stance"
+	harmless_stance.kind = DamageRules.Kind.PHYSICAL
+	harmless_stance.coefficient = 0.0
+	harmless_stance.max_level = 1
+	second.skill_definitions = [alias_skill, harmless_stance]
+	second.initial_skills = {"arcane_wave": 1, "harmless_stance": 1}
+	second.reset()
+	ids.clear()
+	for option: Dictionary in second._available_choices():
+		ids.append(option.id)
+	check(ids.has("magic_attack") and not ids.has("physical_attack") and not ids.has("independent_attack"), "Attack cards follow a custom alias skill's damage kind, not swordmaster IDs or a zero-damage stance")
+	first.reset()
+	first.add_experience(1000)
+	var earned := first.pending_levels
+	var remainder := first.xp
+	check(earned > 1 and remainder < first.xp_required(), "One XP grant preserves overflow and can earn multiple pending choices")
+	check(not first.choose(-1) and not first.choose(3) and first.pending_levels == earned, "Invalid choices do not consume a level")
+	var reentrant: Array[bool] = []
+	var retry: Callable = func(): reentrant.append(first.choose(0))
+	first.changed.connect(retry)
+	first.choose(0)
+	first.changed.disconnect(retry)
+	check(first.pending_levels == earned - 1 and reentrant == [false], "One choice cannot synchronously consume a second choice through a signal callback")
+	var unique := true
+	while first.pending_levels > 0:
+		ids.clear()
+		unique = unique and first.choices.size() == 3
+		for option: Dictionary in first.choices:
+			unique = unique and not ids.has(option.id)
+			ids.append(option.id)
+		first.choose(0)
+	check(unique and first.xp == remainder and first.choices.is_empty(), "Successive choices remain unique and preserve the unspent XP remainder")
+	first.free()
+	second.free()
+
+func check_automatic_combat() -> void:
+	await prepare(true)
+	var target := enemy_at(Vector3(0, 0.04, -1.5))
+	await physics_wait(0.03)
+	var before: Vector3 = scene.player.global_position
+	var camera_before: Vector3 = scene.camera.global_position
+	var camera_direction: Vector3 = -scene.camera.global_basis.z
+	Input.action_press("move_right")
+	await physics_wait(0.30)
+	Input.action_release("move_right")
+	scene.player.auto_attack = false
+	await physics_wait(0.45)
+	check(scene.player.attack_count >= 1 and target.health < 500.0 and scene.hit_count > 0, "A reachable enemy receives real auto-attack damage without pressing attack")
+	check(scene.player.global_position.distance_to(before) > 0.8, "Auto-attacking does not lock player movement")
+	check(scene.camera.global_position.distance_to(camera_before) > 0.2 and camera_direction.dot(-scene.camera.global_basis.z) > 0.999, "The elevated camera follows movement without rotating with the player")
+	check(not scene.player.attacking and is_zero_approx(scene.player.freeze_left), "The auto-attack animation and hit-stop recover cleanly")
+	await prepare(true)
+	target = enemy_at(Vector3(6, 0.04, 0))
+	before = scene.player.global_position
+	await physics_wait(0.65)
+	check(scene.player.attack_count == 0 and target.health == 500.0, "Auto-attacks do not start on an unreachable enemy")
+	check(Vector2(scene.player.position.x - before.x, scene.player.position.z - before.z).length() < 0.01, "Auto-targeting never walks the player toward enemies")
+	await prepare(true)
+	var first := enemy_at(Vector3(0, 0.04, -1.5))
+	var second := enemy_at(Vector3(0, 0.04, 1.8))
+	await until(func() -> bool: return scene.player.attacking, 0.3)
+	var direction: Vector3 = scene.player.attack_direction
+	first.receive_damage({"damage": 10000, "critical": false, "dodged": false}, Vector3.ZERO)
+	await physics_wait(0.15)
+	check(scene.player.attack_direction.is_equal_approx(direction), "Losing a target cannot rotate a committed attack mid-swing")
+	await physics_wait(0.65)
+	check(scene.player.attack_count >= 2 and scene.player.attack_direction.dot(direction) < -0.8 and is_instance_valid(second), "The next combo boundary reacquires a different reachable target")
+	await prepare(false)
+	scene.player.position = Vector3(scene.player.arena_radius - 0.7, 0.04, 0)
+	Input.action_press("move_right")
+	await physics_wait(0.8)
+	Input.action_release("move_right")
+	check(Vector2(scene.player.position.x, scene.player.position.z).length() <= scene.player.arena_radius - 0.45, "The arena boundary contains continued player movement")
+	await prepare(false)
+	# S uses the flattened camera-forward direction: the arena's screen-bottom edge.
+	Input.action_press("move_down")
+	await physics_wait(3.35)
+	Input.action_release("move_down")
+	await physics_wait(0.65)
+	var foot: Vector2 = scene.camera.unproject_position(scene.player.get_node("Footing").global_position)
+	var view_height: float = get_viewport().get_visible_rect().size.y
+	var edge_reached: bool = Vector2(scene.player.position.x, scene.player.position.z).length() >= scene.player.arena_radius - 1.0
+	check(edge_reached and foot.y > 0.0 and foot.y < view_height * 0.83, "After WASD movement settles at the bottom boundary, the player's feet stay above the bottom HUD safety line")
+
+func check_active_skills() -> void:
+	await prepare(false)
+	var target := enemy_at(Vector3(0, 0.04, -1.5))
+	await physics_wait(0.04)
+	press("skill")
+	await physics_wait(0.08)
+	check(scene.player.using_skill and scene.player.skill_cooldown > 0.0, "The configured skill input starts the authored ring attack and cooldown")
+	await physics_wait(0.18)
+	check(target.health == 500.0, "The active skill windup does not apply premature damage")
+	await physics_wait(0.55)
+	check(target.health == 445.0 and scene.hit_count == 1, "One real ring release applies one 55-damage physical hit")
 	var count: int = scene.player.attack_count
-	for i in 12:
-		press("attack")
-	await wait(1.25)
-	check(scene.player.attack_count == count + 1, "Early input spam cannot queue repeated attacks")
-	pair()
-	await wait(0.1)
-	count = scene.player.attack_count
-	press("attack")
-	await wait(0.57)
-	press("attack")
-	await wait(0.8)
-	check(scene.player.attack_count == count + 2, "Late single-slot attack buffer accepts one follow-up")
-	pair()
-	await wait(0.1)
-	for i in 4:
-		scene.enemy.position = scene.player.position + Vector3(1.65, 0, -0.45)
-		scene.enemy.return_delay = 99
-		await wait(0.08)
-		press("attack")
-		await wait(0.85)
-	check(scene.enemy.dead and scene.enemy.health == 0, "Four confirmed hits produce one death")
-	check(scene.enemy.collision_layer == 0, "Defeated guard does not leave an invisible upright collider")
-	await capture("05-defeated")
-	scene.player.position = Vector3(1.15, 0.02, -0.6)
-	await wait(3.4)
-	check(not scene.enemy.dead and scene.enemy.health == 100, "Target respawns cleanly with full health")
-	check(scene.enemy.position.distance_to(scene.player.position) > 1.0 and scene.enemy.collision_layer == 4, "Occupied respawn point is resolved without overlapping the hero")
-	pair()
-	press("attack")
-	await wait(0.20)
-	press("restart")
-	await wait(0.3)
-	check(scene.enemy.health == 100 and not scene.player.attacking and scene.player.animation.speed_scale == 1, "Reset during contact restores animation, health and transient state")
-	# The skill uses the same scene, authored rig and native physics at both frame caps.
-	pair()
-	await wait(0.1)
-	key_event.physical_keycode = KEY_K
-	key_event.pressed = true
-	skill_started_ms = Time.get_ticks_msec()
-	Input.parse_input_event(key_event)
-	await get_tree().physics_frame
-	check(scene.player.using_skill and scene.player.animation.current_animation == DuelFighter.SKILL, "Physical K starts the authored spin skill immediately")
-	key_event.pressed = false
-	Input.parse_input_event(key_event)
-	await wait(0.25)
-	check(scene.enemy.health == 100 and scene.hit_count == 0, "Skill charge cannot deal damage or fake hit confirmation")
-	check(scene.player.sword.material_overlay == scene.player.sword_glow and float(scene.player.sword_glow.get_shader_parameter("flash")) > 0.3, "Skill charge illuminates the equipped greatsword, not the hidden old blade")
-	await wait(1.1)
-	check(first_skill_contact_ms >= 425 and first_skill_contact_ms < 495, "Skill impact stays aligned to the 440 ms animation event")
-	check(scene.enemy.health == 45 and scene.hit_count == 1, "One skill release deals exactly one 55-damage hit")
-	check(scene.enemy.position.distance_to(Vector3(0.95, 0.02, -0.5)) > 1.0, "Skill impact produces stronger physical knockback")
-	check(not scene.player.attacking and scene.player.freeze_left == 0.0 and scene.player.animation.speed_scale == 1.0, "Skill hit-stop and recovery release control cleanly")
-	count = scene.player.attack_count
-	for i in 12:
+	for attempt in 8:
 		press("skill")
-	await wait(0.15)
-	check(scene.player.attack_count == count, "Cooldown blocks repeated skill requests without queuing them")
-	press("attack")
-	await get_tree().physics_frame
-	check(scene.player.attacking and not scene.player.using_skill, "Normal attack remains available during skill cooldown")
-	await wait(1.8)
-	check(scene.player.skill_cooldown == 0.0, "Skill cooldown returns to ready after three seconds")
-	pair()
-	await wait(0.1)
-	mouse_event.button_index = MOUSE_BUTTON_RIGHT
-	mouse_event.pressed = true
-	Input.parse_input_event(mouse_event)
-	await get_tree().physics_frame
-	check(scene.player.using_skill, "Right mouse button starts the skill through InputMap")
-	mouse_event.pressed = false
-	Input.parse_input_event(mouse_event)
-	await wait(0.19)
-	await capture("10-skill-charge")
-	await wait(0.17)
-	await capture("11-skill-spin")
-	await wait(0.14)
-	await capture("12-skill-impact")
-	check(scene.hud.popups.size() == 1 and int(scene.hud.popups[0].damage) == 55, "Skill damage popup uses the actual damage value")
-	await wait(0.28)
-	await capture("13-skill-follow-through")
-	await wait(0.5)
-	pair()
-	scene.player.position = Vector3(-4, 0.02, 0)
-	scene.enemy.position = Vector3(4, 0.02, 0)
-	await wait(0.1)
-	press("skill")
-	await wait(1.3)
-	check(scene.enemy.health == 100 and scene.hit_count == 0 and scene.shake_time == 0.0, "Out-of-range skill plays but cannot damage or trigger impact shake")
-	pair()
-	await wait(0.1)
-	press("skill")
-	await wait(0.06)
-	scene.enemy.position = scene.player.position - scene.player.attack_direction * 2.0
-	await wait(1.2)
-	check(scene.enemy.health == 45, "The circular blade also hits an overlapping target behind the player")
-	pair()
-	await wait(0.1)
-	press("attack")
-	await wait(0.57)
-	press("skill")
-	await wait(1.4)
-	check(scene.player.attack_count == 2 and scene.enemy.health == 20, "Late normal-attack buffer links into one skill without duplicate damage")
-	pair()
-	press("skill")
-	await wait(0.18)
-	scene.hud.toggle_pause()
-	var frozen_time: float = scene.player.animation.current_animation_position
-	var frozen_cooldown: float = scene.player.skill_cooldown
-	await wait(0.2)
-	check(is_equal_approx(scene.player.animation.current_animation_position, frozen_time) and is_equal_approx(scene.player.skill_cooldown, frozen_cooldown), "Pause freezes the skill animation and cooldown together")
-	scene.hud.toggle_pause()
-	press("restart")
-	await wait(0.6)
-	check(scene.enemy.health == 100 and not scene.player.using_skill and scene.player.skill_cooldown == 0.0 and scene.feedback.get_child_count() == 0, "Reset cancels charge VFX, pending hit events and cooldown")
-	pair()
-	press("skill")
-	await wait(0.2)
-	scene.set_frame_limit(60 if requested_fps == 120 else 120)
-	await wait(1.1)
-	check(scene.enemy.health == 45 and scene.hit_count == 1 and not scene.player.attacking, "Switching frame cap mid-skill preserves one hit and a clean recovery")
-	scene.set_frame_limit(requested_fps)
-	pair()
-	scene.enemy.health = 40
-	await wait(0.1)
-	press("skill")
-	await wait(1.3)
-	check(scene.enemy.dead and scene.defeat_count == 1 and scene.enemy.collision_layer == 0, "Skill lethal impact triggers the existing death path exactly once")
-	pair()
-	scene.hud.toggle_pause()
-	await get_tree().process_frame
-	await capture("06-pause")
-	var before: Vector3 = scene.player.position
+	await physics_wait(0.15)
+	check(scene.player.attack_count == count, "Active-skill input spam is rejected during cooldown")
+	await prepare(false)
+	scene.player.request_ghost()
+	check(not scene.player.ghost_active and scene.player.ghost_cooldown == 0.0, "The locked ghost skill cannot be activated")
+	scene.progression.skills.ghost = 1
+	press("ghost_state")
+	await physics_wait(0.03)
+	check(scene.player.ghost_active and scene.player.ghost_left > 7.8 and scene.player.ghost_cooldown > 23.8, "Unlocked ghost uses the configured eight-second duration and 24-second cooldown")
+	check(scene.player.stats.physical_attack == 25.0 and scene.player.damage_multiplier == 1.5, "Ghost is a temporary combat multiplier rather than a permanent stat mutation")
+	var original_cooldown: float = scene.player.ghost_cooldown
+	scene.player.ghost_cooldown = 0.0
+	scene.player.ghost_left = 3.0
+	press("ghost_state")
+	await physics_wait(0.03)
+	check(scene.player.ghost_active and scene.player.ghost_cooldown == 0.0 and scene.player.ghost_left <= 3.0 and scene.player.ghost_left > 2.8, "Repeated G during an active ghost buff neither spends a ready cooldown nor refreshes its duration")
+	scene.player.ghost_cooldown = original_cooldown
+	scene.player.ghost_left = 0.03
+	await physics_wait(0.12)
+	check(not scene.player.ghost_active and not scene.player.ghost_requested and scene.player.damage_multiplier == 1.0 and scene.player.ghost_cooldown > 0.0, "Ghost expires and leaves its cooldown in force")
+
+func check_incoming_damage() -> void:
+	await prepare(false)
+	var enemy := enemy_at(Vector3(0, 0.04, -1.5), 500.0, "chaser", true)
+	enemy.stats.physical_attack = 12.0
+	enemy._attack_left = 0.1
+	scene.player.stats.physical_defense = 0.0
+	var health: float = scene.player.health
+	await physics_wait(0.2)
+	check(scene.player.health == health, "An approaching enemy's body and attack windup do not cause contact damage")
+	var connected := await until(func() -> bool: return scene.player.health < health, 1.8)
+	check(connected and scene.player.health == health - 12.0, "A live enemy telegraph releases real damage against the player")
+	enemy.set_physics_process(false)
+	var protected_health: float = scene.player.health
+	var result: Dictionary = scene.player.receive_damage(DamageRules.calculate(enemy.stats, scene.player.stats, 2, 1.0, 0, 1.0, 1.0), Vector3.ZERO)
+	check(result.get("immune", false) and result.actual == 0 and scene.player.health == protected_health, "The post-hit protection also blocks an immediate fixed-damage hit")
+	await physics_wait(0.7)
+	result = scene.player.receive_damage(DamageRules.calculate(enemy.stats, scene.player.stats, 2, 1.0, 0, 1.0, 1.0), Vector3.ZERO)
+	check(result.actual > 0 and scene.player.health < protected_health, "Damage becomes possible again after post-hit protection expires")
+	await prepare(false)
+	enemy = enemy_at(Vector3(0, 0.04, -5.0), 500.0, "ranged")
+	health = scene.player.health
+	enemy._launch_projectile((scene.player.global_position - enemy.global_position).normalized(), 6.0, 1.0)
+	check(await until(func() -> bool: return scene.player.health < health, 1.5), "A native ranged projectile reaches the player and applies damage")
+
+func check_pickups_and_choices() -> void:
+	await prepare(false)
+	var enemy := enemy_at(Vector3(6, 0.04, 0), 48.0)
+	var result: Dictionary = scene.player.deal_damage(enemy, DamageRules.Kind.FIXED, 100.0, 0)
+	await physics_wait(0.04)
+	check(result.lethal and result.actual == 48.0 and scene.defeat_count == 1 and scene.drops.get_child_count() == 1, "A lethal hit reports actual HP loss and creates exactly one XP pickup")
+	enemy.receive_damage({"damage": 10000, "dodged": false}, Vector3.ZERO)
+	await physics_wait(0.04)
+	check(scene.defeat_count == 1 and scene.drops.get_child_count() == 1, "Repeated hits on a dead enemy cannot duplicate its kill reward")
+	await physics_wait(0.25)
+	check(scene.progression.xp == 0 and scene.drops.get_child_count() == 1, "A distant XP pickup stays on the ground")
+	var gem := scene.drops.get_child(0) as ExperienceGem
+	var expected_xp := gem.value
+	gem.global_position = scene.player.global_position + Vector3(1.4, 0.2, 0)
+	check(await until(func() -> bool: return scene.progression.xp == expected_xp, 1.0), "A pickup inside the stat-driven radius homes in and grants its XP")
+	await physics_wait(0.03)
+	check(not is_instance_valid(gem), "A collected pickup removes itself exactly once")
+	enemy = enemy_at(Vector3(6, 0.04, 0), 48.0)
+	enemy.experience_value = 100
+	scene.player.deal_damage(enemy, DamageRules.Kind.FIXED, 100.0, 0)
+	await physics_wait(0.03)
+	gem = scene.drops.get_child(0) as ExperienceGem
+	scene.player.skill_cooldown = 2.0
+	scene.director.enabled = true
+	gem.global_position = scene.player.global_position + Vector3(1.4, 0.2, 0)
+	check(await until(func() -> bool: return scene.state == "choosing", 1.0), "Collecting enough real XP opens the upgrade state")
+	check(get_tree().paused and scene.hud.choice_panel.visible and scene.progression.choices.size() == 3 and scene.progression.pending_levels >= 2, "A multi-level pickup pauses the battle and displays three choices")
+	var time: float = scene.director.elapsed
+	var cooldown: float = scene.player.skill_cooldown
+	await physics_wait(0.3)
+	check(scene.director.elapsed == time and scene.player.skill_cooldown == cooldown, "Upgrade pause freezes the wave clock and active cooldown")
+	scene.toggle_pause()
+	check(scene.state == "choosing" and get_tree().paused and scene.hud.choice_panel.visible, "The pause action cannot bypass a required upgrade")
+	var previous_level: int = scene.progression.level
+	var previous_pending: int = scene.progression.pending_levels
+	# Model another gem collected in the same physics batch, earning just one more level.
+	var extra_experience: int = scene.progression.xp_required() - scene.progression.xp + 3
+	scene._collect_experience(extra_experience)
+	await physics_wait(0.15)
+	var heading: String = scene.hud._choice_subtitle.text
+	check(scene.state == "choosing" and get_tree().paused and scene.progression.xp == 3 and scene.progression.level == previous_level + 1 and scene.progression.pending_levels == previous_pending + 1 and heading.contains("Lv.%d" % scene.progression.level) and heading.contains("尚有 %d 次选择" % scene.progression.pending_levels), "A second gem received while choosing preserves XP and refreshes the displayed level and pending-choice count")
+	await capture("choosing")
+	await capture_choice_layouts()
+	var pending: int = scene.progression.pending_levels
+	var remainder: int = scene.progression.xp
+	var unique := true
+	var sequential := true
+	while scene.progression.pending_levels > 0:
+		var ids: Array[String] = []
+		for option: Dictionary in scene.progression.choices:
+			unique = unique and not ids.has(option.id)
+			ids.append(option.id)
+		var before: int = scene.progression.pending_levels
+		scene.choose_upgrade(0)
+		sequential = sequential and scene.progression.pending_levels == before - 1
+		if scene.progression.pending_levels > 0:
+			sequential = sequential and scene.state == "choosing" and get_tree().paused
+	check(pending >= 2 and sequential and unique, "Each UI-level choice resolves only one level and rolls fresh unique options")
+	check(scene.state == "playing" and not get_tree().paused and not scene.hud.choice_panel.visible and scene.progression.xp == remainder, "The last selection resumes play without discarding overflow XP")
+
+func capture_choice_layouts() -> void:
+	if headless:
+		return
+	var original := DisplayServer.window_get_size()
+	for size: Vector2i in [Vector2i(960, 600), Vector2i(1280, 720), Vector2i(1440, 900)]:
+		DisplayServer.window_set_size(size)
+		await physics_wait(0.1)
+		await capture("layout-%dx%d" % [size.x, size.y])
+		var viewport := get_viewport().get_visible_rect()
+		var box: Rect2 = scene.hud._choice_box.get_global_rect()
+		check(viewport.grow(1.0).encloses(box), "Upgrade content stays inside the %dx%d viewport" % [size.x, size.y])
+	DisplayServer.window_set_size(original)
+	await physics_wait(0.1)
+
+func check_pause() -> void:
+	await prepare(false)
+	var target := enemy_at(Vector3(0, 0.04, -5.0), 500.0, "ranged")
+	scene.progression.skills.meteor = 1
+	scene.player.request_skill()
+	await physics_wait(0.12)
+	scene.storm._call_meteor(target)
+	target._launch_projectile(Vector3.RIGHT, 6.0, 1.0)
+	var projectile: Node3D
+	for child in target.get_children():
+		if child is EnemyProjectile:
+			projectile = child
+	scene.director.enabled = true
+	scene.director._spawn_timer.start(0.2)
+	scene.toggle_pause()
+	var time: float = scene.director.elapsed
+	var cooldown: float = scene.player.skill_cooldown
+	var animation_time: float = scene.player.animation.current_animation_position
+	var spawn_time: float = scene.director._spawn_timer.time_left
+	var meteor_time: float = scene.storm.meteors[0].left
+	var meteor_position: Vector3 = scene.storm.meteors[0].node.global_position
+	var projectile_position: Vector3 = projectile.global_position
+	var position: Vector3 = scene.player.global_position
 	Input.action_press("move_right")
-	await get_tree().create_timer(0.2, true).timeout
+	await physics_wait(0.35)
 	Input.action_release("move_right")
-	check(scene.player.position.is_equal_approx(before), "Pause stops gameplay simulation")
-	scene.hud.toggle_pause()
-	Input.action_press("move_right")
-	await wait(2.2)
-	Input.action_release("move_right")
-	check(scene.player.position.length() <= 5.7, "Stage boundary contains player movement")
-	await check_combos()
-	await check_storm()
-	storm_arena(1.0)
-	var performance_blades := formation_ids()
-	record_frames = true
-	for i in 8:
-		if i == 4:
-			press("ghost_state")
-		for guard in scene.guards:
-			guard.reset_fighter()
-			guard.health = 1000
-			guard.return_delay = 99
-		if i % 2 == 0:
-			scene.player.skill_cooldown = 0.0
-		press("skill" if i % 2 == 0 else "attack")
-		await wait(1.3 if i % 2 == 0 else 0.82)
-	record_frames = false
-	if scene.player.ghost_requested:
-		press("ghost_state")
-	await wait(2.2)
-	check(scene.feedback.get_child_count() == 0, "Transient particles, rings, audio and lights are released")
-	check(scene.storm.MAX_ACTIVE_SWORDS == 8 and max_active_swords > 0 and max_active_swords <= 8 and max_active_meteors > 0, "Multi-target effects use no more than the eight physical formation blades")
-	check(formation_is_consistent(performance_blades, true) and scene.storm.meteors.is_empty(), "The same eight swords return to their formation after the last attack")
-	frame_times.sort()
-	wall_times.sort()
-	var stats := {"renderer": RenderingServer.get_current_rendering_method(), "adapter": RenderingServer.get_video_adapter_name(), "headless": headless, "passed": checks, "failed": failures}
-	stats["first_contact_ms"] = first_contact_ms
-	stats["first_skill_contact_ms"] = first_skill_contact_ms
-	stats["frame_limit"] = requested_fps
-	stats["max_draw_calls"] = max_draw_calls
-	stats["max_active_swords"] = max_active_swords
-	stats["max_active_meteors"] = max_active_meteors
-	stats["performance_targets"] = scene.guards.size()
-	stats["performance_modes"] = ["normal", "ghost"]
-	stats["normal_combo_damage"] = normal_combo_damage
-	stats["ghost_combo_damage"] = ghost_combo_damage
-	stats["normal_combo_wall_ms"] = normal_combo_wall_ms
-	stats["ghost_combo_wall_ms"] = ghost_combo_wall_ms
-	stats["viewport"] = str(get_viewport().get_visible_rect().size)
-	stats["window_pixels"] = str(DisplayServer.window_get_size())
-	if not frame_times.is_empty():
-		stats["frame_median_ms"] = frame_times[frame_times.size() / 2]
-		stats["frame_p95_ms"] = frame_times[int(frame_times.size() * 0.95)]
-		stats["frame_samples"] = frame_times.size()
-	if not wall_times.is_empty():
-		stats["wall_frame_median_ms"] = wall_times[wall_times.size() / 2]
-		stats["wall_frame_p95_ms"] = wall_times[int(wall_times.size() * 0.95)]
-	var output := FileAccess.open("res://artifacts/verification-%dfps.json" % requested_fps, FileAccess.WRITE)
-	output.store_string(JSON.stringify(stats, "\t"))
-	output.close()
-	print("VERIFICATION ", JSON.stringify(stats))
-	get_tree().quit(0 if failures.is_empty() else 1)
+	check(scene.state == "paused" and get_tree().paused and scene.hud.pause_panel.visible, "The pause action opens its native modal and pauses the tree")
+	check(scene.director.elapsed == time and scene.director._spawn_timer.time_left == spawn_time and scene.player.skill_cooldown == cooldown and scene.player.animation.current_animation_position == animation_time, "Pause freezes wave timers, active cooldown and authored animation together")
+	check(scene.storm.meteors[0].left == meteor_time and scene.storm.meteors[0].node.global_position.is_equal_approx(meteor_position) and projectile.global_position.is_equal_approx(projectile_position), "Pause freezes in-flight meteor state, its tween and enemy projectiles")
+	check(scene.player.global_position.is_equal_approx(position), "Movement input cannot advance the paused player")
+	await capture("pause")
+	scene.toggle_pause()
+	await physics_wait(0.15)
+	check(scene.state == "playing" and not get_tree().paused and scene.director.elapsed > time and scene.player.skill_cooldown < cooldown, "Resume restarts simulation and cooldown from their frozen state")
 
-func wait_attack_end() -> void:
-	# Native physics frames, with a finite timeout so a stuck move fails instead of hanging.
-	for i in 360:
-		await get_tree().physics_frame
-		if not scene.player.attacking:
-			return
-	check(false, "An authored combo move finishes within three seconds")
-
-func wait_move_time(time: float) -> void:
-	for i in 240:
-		await get_tree().physics_frame
-		if not scene.player.attacking or scene.player.animation.current_animation_position >= time:
-			return
-	check(false, "The combo animation reaches its late input-buffer window")
-
-func stationary_pair() -> void:
-	pair()
-	# A stationary high-health native collider isolates damage-window deduplication
-	# from knockback. Real moving-target combat remains covered by the other checks.
-	scene.player.position = Vector3(0, 0.04, 0)
-	scene.enemy.position = Vector3(0, 0.04, 1.8)
-	scene.enemy.health = 10000
-	scene.enemy.set_physics_process(false)
-	scene.player.reset_physics_interpolation()
-	scene.enemy.reset_physics_interpolation()
-
-func check_combo_assets() -> void:
-	var original := preload("res://assets/characters/Knight.glb").instantiate()
-	var authored := original.get_node("AnimationPlayer") as AnimationPlayer
-	var normal_sources: Array[StringName] = []
-	var ghost_sources: Array[StringName] = []
-	var poses_preserved := true
-	var event_counts_match := true
-	var event_total := [0, 0]
-	for mode in 2:
-		var profiles: Array = DuelFighter.NORMAL_COMBO if mode == 0 else DuelFighter.GHOST_COMBO
-		for profile in profiles:
-			var sources := normal_sources if mode == 0 else ghost_sources
-			if not sources.has(profile.source):
-				sources.append(profile.source)
-			var exists: bool = authored.has_animation(profile.source) and scene.player.animation.has_animation(profile.animation)
-			poses_preserved = poses_preserved and exists
-			if not exists:
-				continue
-			var source := authored.get_animation(profile.source)
-			var runtime: Animation = scene.player.animation.get_animation(profile.animation)
-			# Retiming is allowed; the authored transform keys themselves must remain intact.
-			for track in source.get_track_count():
-				var type := source.track_get_type(track)
-				if type not in [Animation.TYPE_POSITION_3D, Animation.TYPE_ROTATION_3D, Animation.TYPE_SCALE_3D]:
-					continue
-				var mapped := runtime.find_track(source.track_get_path(track), type)
-				if mapped < 0 or runtime.track_get_key_count(mapped) != source.track_get_key_count(track):
-					poses_preserved = false
-					continue
-				for key in source.track_get_key_count(track):
-					poses_preserved = poses_preserved and runtime.track_get_key_value(mapped, key) == source.track_get_key_value(track, key)
-			var windows := 0
-			for track in runtime.get_track_count():
-				if runtime.track_get_type(track) != Animation.TYPE_METHOD:
-					continue
-				for key in runtime.track_get_key_count(track):
-					var event: Dictionary = runtime.track_get_key_value(track, key)
-					if event.method == &"_open_hit_window":
-						windows += 1
-			event_counts_match = event_counts_match and windows == profile.strikes.size()
-			event_total[mode] += windows
-	check(normal_sources.size() == 3 and ghost_sources.size() == 5 and poses_preserved, "Three normal and five ghost moves preserve distinct authored GLB transform keys instead of generating new skeletal poses")
-	check(event_counts_match and event_total == [3, 8], "Native AnimationPlayer method tracks define exactly three normal hits and eight ghost hits per complete chain")
-	original.free()
-
-func check_combos() -> void:
-	pair()
-	check_combo_assets()
-	var hits: Array[Dictionary] = []
-	var record_hit := func(target: DuelFighter, _point: Vector3, _lethal: bool, damage: int, heavy: bool) -> void:
-		hits.append({"target": target.get_instance_id(), "strike": scene.player.strike_index, "clip": scene.player.animation.current_animation, "damage": damage, "heavy": heavy})
-	scene.player.hit_confirmed.connect(record_hit)
-	var played: Array[StringName] = []
-	for mode in 2:
-		stationary_pair()
-		if mode == 1:
-			press("ghost_state")
-		var profiles: Array = DuelFighter.NORMAL_COMBO if mode == 0 else DuelFighter.GHOST_COMBO
-		var cycle_damage := 0
-		var cycle_hits := 0
-		var began := Time.get_ticks_msec()
-		for index in profiles.size():
-			var profile: Dictionary = profiles[index]
-			scene.player.position = Vector3(0, 0.04, 0)
-			scene.player.velocity = Vector3.ZERO
-			scene.enemy.position = Vector3(0, 0.04, 1.8)
-			scene.enemy.health = 10000
-			await wait(0.06)
-			hits.clear()
-			press("attack")
-			await get_tree().physics_frame
-			played.append(scene.player.animation.current_animation)
-			check(scene.player.combo_index == index and scene.player.animation.current_animation == profile.animation and scene.player.combo_total == profiles.size(), "%s move %d selects its own authored animation through normal attack input" % ["Ghost" if mode == 1 else "Normal", index + 1])
-			await wait_attack_end()
-			var expected_damage := roundi(float(profile.damage) * (1.5 if mode == 1 else 1.0))
-			var unique: Dictionary = {}
-			var exact: bool = hits.size() == profile.strikes.size()
-			for hit in hits:
-				var key := "%d/%d" % [hit.target, hit.strike]
-				exact = exact and not unique.has(key) and hit.strike >= 0 and hit.strike < profile.strikes.size() and hit.damage == expected_damage and not hit.heavy
-				unique[key] = true
-				cycle_damage += int(hit.damage)
-				cycle_hits += 1
-			exact = exact and scene.enemy.health == 10000 - expected_damage * profile.strikes.size()
-			check(exact, "%s move %d deals exactly %d event-aligned hits, once per target per window" % ["Ghost" if mode == 1 else "Normal", index + 1, profile.strikes.size()])
-		if mode == 0:
-			normal_combo_damage = cycle_damage
-			normal_combo_wall_ms = Time.get_ticks_msec() - began
-			check(cycle_hits == 3 and cycle_damage == 91, "The complete normal chain is three distinct attacks and 91 actual damage")
-		else:
-			ghost_combo_damage = cycle_damage
-			ghost_combo_wall_ms = Time.get_ticks_msec() - began
-			check(cycle_hits == 8 and cycle_damage == 270, "The complete ghost chain becomes five moves, eight real hits and 270 actual damage")
-	check(ghost_combo_damage * normal_combo_wall_ms > normal_combo_damage * ghost_combo_wall_ms and is_equal_approx(scene.player.attack_speed, 1.25), "Ghost state measurably raises full-chain damage throughput and uses 1.25x native animation speed")
-	await wait(0.72)
-	press("attack")
-	await get_tree().physics_frame
-	check(scene.player.combo_index == 0 and scene.player.animation.current_animation == DuelFighter.GHOST_COMBO[0].animation, "A gap longer than the combo grace period restarts at the first ghost move")
-	await wait_attack_end()
-
-	# Multiple separate native colliders, not overlapping fixture bodies.
-	for mode in 2:
-		storm_arena(0.0)
-		scene.storm.set_active(false)
-		var placements := [Vector3(0, 0.04, 1.8), Vector3(-0.8, 0.04, 1.8), Vector3(0.8, 0.04, 1.8), Vector3(0, 0.04, -1.8)]
-		for i in scene.guards.size():
-			scene.guards[i].position = placements[i]
-			scene.guards[i].health = 10000
-			scene.guards[i].set_physics_process(false)
-		if mode == 1:
-			press("ghost_state")
-		await wait(0.1)
-		hits.clear()
-		press("attack")
-		if mode == 1:
-			await wait(0.19)
-			await capture("20-ghost-multi-hit")
-		await wait_attack_end()
-		var expected_hits := 3 if mode == 0 else 8
-		var expected_damage := 25 if mode == 0 else 60
-		var group_exact := hits.size() == expected_hits
-		for i in scene.guards.size():
-			var should_hit: bool = mode == 1 or i < 3
-			group_exact = group_exact and scene.guards[i].health == 10000 - (expected_damage if should_hit else 0)
-		check(group_exact, "Ghost spinning windows hit all four surrounding enemies exactly twice" if mode == 1 else "A normal slash hits all three front targets once while excluding the target behind")
-
-	stationary_pair()
-	# Include normal lunging travel, not just the stationary hitbox extent.
-	scene.enemy.position = Vector3(0, 0.04, 3.6)
-	scene.player.facing = Vector3.BACK
-	await wait(0.1)
-	press("attack")
-	await wait_attack_end()
-	var missed_normal: bool = scene.enemy.health == 10000
-	scene.player.position = Vector3(0, 0.04, 0)
-	scene.player.velocity = Vector3.ZERO
-	press("ghost_state")
-	await wait(0.1)
-	press("attack")
-	await wait_attack_end()
-	check(missed_normal and scene.enemy.health < 10000 and scene.player.hitbox.scale.is_equal_approx(Vector3(1.3, 1.0, 1.3)), "Ghost state expands the native melee area and reaches a target outside the normal slash")
-	stationary_pair()
-	press("ghost_state")
-	scene.player.position = Vector3(-4, 0.04, 0)
-	scene.enemy.position = Vector3(4, 0.04, 0)
-	await wait(0.1)
-	hits.clear()
-	press("attack")
-	await wait_attack_end()
-	check(hits.is_empty() and scene.enemy.health == 10000 and scene.shake_time == 0.0, "A ghost multi-hit whiff still cannot deal remote damage or fake hit-confirm shake")
-
-	stationary_pair()
-	await wait(0.1)
-	press("attack")
-	await wait(0.06)
-	var key := InputEventKey.new()
-	key.physical_keycode = KEY_G
-	key.pressed = true
-	Input.parse_input_event(key)
-	key = key.duplicate() as InputEventKey
-	key.pressed = false
-	Input.parse_input_event(key)
-	check(not scene.player.ghost_active and scene.player.ghost_requested and scene.player.animation.current_animation == DuelFighter.ATTACK, "Physical G requests ghost state without cancelling or replacing the current normal attack")
-	await wait_attack_end()
-	check(scene.player.ghost_active and scene.player.ghost_requested and scene.enemy.health == 9975, "Ghost state takes effect only after the original move completes with its original damage")
-	var pad := InputEventJoypadButton.new()
-	pad.button_index = JOY_BUTTON_B
-	check(pad.is_action("ghost_state") and not pad.is_action("skill") and not pad.is_action("sword_storm"), "Gamepad B maps only to ghost state, alongside the existing X/Y actions")
-	await capture("19-ghost-state")
-	for i in 4:
-		press("ghost_state")
-	check(scene.player.ghost_active and is_equal_approx(scene.player.attack_speed, 1.25) and scene.player.hitbox.scale.is_equal_approx(Vector3(1.3, 1.0, 1.3)), "Repeated state toggles do not stack attack speed or hitbox scale")
-	scene.enemy.health = 10000
-	scene.player.position = Vector3(0, 0.04, 0)
-	scene.player.velocity = Vector3.ZERO
-	await wait(0.1)
-	press("attack")
-	await wait(0.04)
-	press("ghost_state")
-	check(scene.player.ghost_active and not scene.player.ghost_requested, "Leaving ghost state is deferred while its multi-hit animation is active")
-	await wait_attack_end()
-	check(not scene.player.ghost_active and scene.enemy.health == 9940 and is_equal_approx(scene.player.attack_speed, 1.0), "Deferred ghost exit preserves both current hits, then restores normal speed")
-
-	stationary_pair()
-	press("ghost_state")
-	await wait(0.1)
-	press("attack")
-	await wait(0.06)
-	scene.hud.toggle_pause()
-	var frozen_time: float = scene.player.animation.current_animation_position
-	var frozen_hp: int = scene.enemy.health
-	press("ghost_state")
-	await wait(0.2)
-	check(is_equal_approx(scene.player.animation.current_animation_position, frozen_time) and scene.enemy.health == frozen_hp and scene.player.ghost_active and scene.player.ghost_requested, "Pause freezes ghost animation and pending hit events and ignores combat state input")
-	scene.hud.toggle_pause()
-	await wait_attack_end()
-	check(scene.enemy.health == 9940, "Resuming a paused ghost attack completes exactly its original two hit windows")
-
-	stationary_pair()
-	press("ghost_state")
-	await wait(0.1)
-	hits.clear()
-	press("skill")
-	await wait_attack_end()
-	check(hits.size() == 1 and hits[0].heavy and hits[0].damage == 83 and scene.enemy.health == 9917, "Ghost state also boosts the existing skill to one real 83-damage hit without multiplying its windows")
-	stationary_pair()
-	press("ghost_state")
-	press("attack")
-	await wait(0.05)
-	scene.player.receive_hit(999, Vector3.ZERO)
-	scene.player.respawn_left = 99.0
-	await wait(0.8)
-	check(scene.player.dead and not scene.player.attacking and not scene.player.active and not scene.player.ghost_active and not scene.player.ghost_requested and scene.enemy.health == 10000, "Player death clears ghost state, its active window and all later animation damage")
-	stationary_pair()
-	press("attack")
-	await wait(0.04)
-	press("ghost_state")
-	press("restart")
-	await wait(0.5)
-	check(not scene.player.attacking and not scene.player.active and not scene.player.ghost_active and not scene.player.ghost_requested and scene.player.hitbox.scale.is_equal_approx(Vector3.ONE) and scene.enemy.health == 100, "Reset cancels pending transformation, combo events and all temporary damage/range boosts")
-
-	stationary_pair()
-	press("ghost_state")
-	await wait(0.1)
-	for i in 12:
-		press("attack")
-	await wait(1.0)
-	check(scene.player.attack_count == 1 and not scene.player.attacking, "Early ghost-input spam cannot enqueue an unbounded chain")
-	stationary_pair()
-	press("ghost_state")
-	await wait(0.1)
-	press("attack")
-	await wait_move_time(scene.player.move_duration - DuelFighter.BUFFER_TIME + 0.035)
-	for i in 12:
-		press("attack")
-	await wait(1.25)
-	check(scene.player.attack_count == 2 and not scene.player.attacking, "The ghost late buffer stores one follow-up move even under repeated input")
-	stationary_pair()
-	press("ghost_state")
-	await wait(0.1)
-	played.clear()
-	var record_move := func(heavy: bool) -> void:
-		if not heavy:
-			played.append(scene.player.animation.current_animation)
-	scene.player.swing_started.connect(record_move)
-	key.physical_keycode = KEY_J
-	key.pressed = true
-	Input.parse_input_event(key)
-	await wait(3.9)
-	key.pressed = false
-	Input.parse_input_event(key)
-	await wait_attack_end()
-	var cycling := played.size() >= 6
-	for i in played.size():
-		cycling = cycling and played[i] == DuelFighter.GHOST_COMBO[i % 5].animation
-	check(cycling, "Holding the physical attack key cycles through all five ghost moves and starts the chain again")
-	var stopped: int = scene.player.attack_count
-	await wait(0.75)
-	check(scene.player.attack_count == stopped and not scene.player.attacking and not scene.player.active, "Releasing held attack finishes the current move without latent attacks or an active collider")
-	scene.player.swing_started.disconnect(record_move)
-	scene.player.hit_confirmed.disconnect(record_hit)
-	pair()
-
-func storm_arena(chance: float) -> void:
-	scene.restart()
-	scene.player.position = Vector3(0, 0.04, 0)
-	var positions := [Vector3(3.8, 0.04, -0.8), Vector3(-3.7, 0.04, -1.0), Vector3(0.9, 0.04, 3.8), Vector3(-1.2, 0.04, -3.8)]
-	for i in scene.guards.size():
-		var guard: DuelFighter = scene.guards[i]
-		guard.process_mode = Node.PROCESS_MODE_INHERIT
-		guard.set_physics_process(true)
-		guard.show()
-		guard.position = positions[i]
-		guard.return_delay = 99.0
-		guard.reset_physics_interpolation()
-	scene.storm.set_active(true)
-	scene.storm.meteor_chance = chance
-
-func formation_ids() -> Array[int]:
+func blade_ids() -> Array[int]:
 	var ids: Array[int] = []
-	for blade in scene.storm.blades:
+	for blade: Node3D in scene.storm.blades:
 		ids.append(blade.get_instance_id())
 	return ids
 
-func formation_is_consistent(ids: Array[int], require_home := false) -> bool:
-	if ids.size() != 8 or scene.storm.blades.size() != 8 or scene.storm.slots.size() != 8:
-		return false
-	var flying_slots: Array[int] = []
-	for flight in scene.storm.flights:
-		var slot: int = flight.slot
-		if slot < 0 or slot >= 8 or flying_slots.has(slot):
-			return false
-		if not is_instance_valid(flight.blade) or flight.blade.get_instance_id() != ids[slot] or flight.blade != scene.storm.blades[slot] or flight.blade.get_parent() != flight.follow:
-			return false
-		flying_slots.append(slot)
-	for i in 8:
-		var blade: Node3D = scene.storm.blades[i]
-		var slot: Node3D = scene.storm.slots[i]
-		if not is_instance_valid(blade) or blade.get_instance_id() != ids[i]:
-			return false
-		if flying_slots.has(i):
-			if require_home or slot.get_child_count() != 0:
-				return false
-		elif blade.get_parent() != slot or slot.get_child_count() != 1 or not blade.transform.is_equal_approx(Transform3D.IDENTITY):
-			return false
-	return true
-
-func check_storm() -> void:
-	storm_arena(0.0)
-	await wait(0.1)
-	check(scene.guards.size() == 4 and scene.storm.active, "One arena reuses four visible guard instances with sword storm enabled")
-	var toggle := InputEventKey.new()
-	toggle.physical_keycode = KEY_L
-	toggle.pressed = true
-	Input.parse_input_event(toggle)
-	await get_tree().physics_frame
-	check(not scene.storm.active and scene.storm.active_swords == 0, "Physical L disables the formation and clears live projectiles")
-	toggle.pressed = false
-	Input.parse_input_event(toggle)
-	press("sword_storm")
-	var pad := InputEventJoypadButton.new()
-	pad.button_index = JOY_BUTTON_Y
-	check(scene.storm.active and pad.is_action("sword_storm") and not pad.is_action("restart"), "Formation toggle restores the state and gamepad Y does not also reset the arena")
-	await capture("15-sword-formation")
-	var original_blades := formation_ids()
-	check(scene.storm.MAX_ACTIVE_SWORDS == 8 and formation_is_consistent(original_blades, true), "Eight original sword instances occupy eight separate formation slots")
-	press("attack")
-	await wait(0.31)
-	check(scene.storm.active_swords == 3 and formation_is_consistent(original_blades), "The first volley physically removes three original blades from their now-empty slots without cloning")
-	var assigned: Array[int] = []
-	var curved := 0
-	var samples: Array[Dictionary] = []
-	for flight in scene.storm.flights:
-		var target: DuelFighter = flight.target
-		if is_instance_valid(target) and not assigned.has(target.get_instance_id()):
-			assigned.append(target.get_instance_id())
-		var path: Path3D = flight.path
-		var curve := path.curve
-		var start := curve.sample_baked(0.0)
-		var end := curve.sample_baked(curve.get_baked_length())
-		var middle := curve.sample_baked(curve.get_baked_length() * 0.5)
-		if (middle - start - (middle - start).project(end - start)).length() > 0.25:
-			curved += 1
-		var follow: PathFollow3D = flight.follow
-		samples.append({"follow": follow, "progress": follow.progress})
-	check(assigned.size() >= 3 and curved >= 3, "A real attack assigns native curved sword paths across distant targets")
-	scene.hud.toggle_pause()
-	await wait(0.18)
-	var frozen := not samples.is_empty()
-	for sample in samples:
-		frozen = frozen and is_instance_valid(sample.follow) and is_equal_approx(sample.follow.progress, sample.progress)
-	check(frozen, "Pause freezes in-flight PathFollow3D progress")
-	scene.hud.toggle_pause()
-	await wait(0.08)
-	var moved := 0
-	for sample in samples:
-		if is_instance_valid(sample.follow) and sample.follow.progress > sample.progress + 0.02:
-			moved += 1
-	check(moved >= 3, "Native sword followers actually advance along their curves after unpausing")
-	await capture("16-sword-crossfire")
-	var saw_return := false
-	var same_instances := true
-	for i in 22:
-		await wait(0.1)
-		same_instances = same_instances and formation_is_consistent(original_blades)
-		for flight in scene.storm.flights:
-			saw_return = saw_return or flight.returning
-	check(saw_return and same_instances, "The original outgoing blades travel a visible return phase with no duplicate instances")
-	var damaged := 0
-	for guard in scene.guards:
-		if guard.health < DuelFighter.MAX_HEALTH:
-			damaged += 1
-	check(damaged >= 3 and scene.storm.sword_hits >= 3, "Flying swords deal real damage to multiple enemies beyond melee reach")
-	check(scene.storm.meteor_rolls == 1 and scene.storm.meteor_count == 0, "Zero meteor probability takes the no-drop branch once per player swing without recursion")
-	check(scene.storm.volley_count >= 2 and formation_is_consistent(original_blades, true), "After one swing the same eight blades are restored to their original slots and local transforms")
-	storm_arena(1.0)
-	for guard in scene.guards:
-		guard.health = 1000
-	press("attack")
-	await wait(0.31)
-	check(scene.storm.meteor_rolls == 1 and scene.storm.meteor_count == 1 and scene.storm.meteors.size() == 1, "Full meteor probability creates one delayed drop from the same real attack path")
-	if not scene.storm.meteors.is_empty():
-		var center: Vector3 = scene.storm.meteors[0].position
-		var offsets := [Vector3(-0.65, 0, -0.65), Vector3(0.65, 0, -0.65), Vector3(-0.65, 0, 0.65), Vector3(0.65, 0, 0.65)]
-		for i in scene.guards.size():
-			scene.guards[i].position = center + offsets[i]
-			scene.guards[i].position.y = 0.04
-			scene.guards[i].velocity = Vector3.ZERO
-	await capture("17-meteor-warning")
-	await wait(0.85)
-	await capture("18-meteor-impact")
-	await wait(0.5)
-	check(scene.storm.meteor_hits >= 2, "The native meteor area query damages multiple enemies at the landing point")
-	check(scene.storm.meteor_rolls == 1 and scene.storm.meteor_count == 1, "Sword penetration and meteor area hits never roll more meteors recursively")
-	storm_arena(1.0)
-	for guard in scene.guards:
-		guard.health = 1000
-	press("ghost_state")
-	press("attack")
-	await wait(1.3)
-	check(scene.storm.meteor_rolls == 1 and scene.storm.meteor_count == 1 and scene.storm.volley_count >= 2, "A two-hit ghost move starts one sword stream and rolls one meteor, not one roll per damage window")
-	storm_arena(0.0)
-	scene.player.position = Vector3(-5.55, 0.04, 0)
-	# Native CharacterBody colliders must not be stacked inside one another.
-	var distant := [Vector3(4.1, 0.04, -2.0), Vector3(4.1, 0.04, 2.0), Vector3(3.85, 0.04, -0.5), Vector3(5.2, 0.04, 0.5)]
-	for i in scene.guards.size():
-		scene.guards[i].position = distant[i]
-	press("attack")
-	await wait(1.5)
-	var untouched := true
-	for guard in scene.guards:
-		untouched = untouched and guard.health == DuelFighter.MAX_HEALTH
-	check(untouched and scene.storm.volley_count == 0, "Enemies outside the wide acquisition radius receive no sword damage")
-	storm_arena(0.0)
-	original_blades = formation_ids()
-	press("attack")
-	await wait(0.28)
-	var target_lost := false
-	if not scene.storm.flights.is_empty():
-		var doomed: DuelFighter = scene.storm.flights[0].target
-		doomed.receive_hit(999, Vector3.ZERO)
-		doomed.respawn_left = 99.0
-		target_lost = true
-	await wait(2.2)
-	check(target_lost and scene.storm.active_swords == 0 and formation_is_consistent(original_blades, true), "A target dying in flight cannot strand a blade away from its formation")
-	storm_arena(1.0)
-	press("attack")
-	await wait(0.28)
-	press("restart")
-	await wait(1.4)
-	untouched = true
-	for guard in scene.guards:
-		untouched = untouched and guard.health == DuelFighter.MAX_HEALTH
-	check(untouched and scene.storm.active_swords == 0 and scene.storm.meteors.is_empty() and scene.storm.meteor_count == 0, "Reset clears flying swords, pending meteors and their delayed damage")
-	storm_arena(1.0)
-	press("attack")
-	await wait(0.28)
-	scene.player.receive_hit(999, Vector3.ZERO)
-	scene.player.respawn_left = 99.0
-	await wait(0.12)
-	check(scene.storm.active_swords == 0 and scene.storm.meteors.is_empty(), "Player death cancels the active sword stream and pending meteor")
-	storm_arena(0.0)
-	for guard in scene.guards:
-		guard.health = 1000
-	original_blades = formation_ids()
-	var hold := InputEventKey.new()
-	hold.physical_keycode = KEY_J
-	hold.pressed = true
-	Input.parse_input_event(hold)
+func check_auxiliary_skills() -> void:
+	await prepare(false)
+	var target := enemy_at(Vector3(0, 0.04, -4.0), 10000.0)
+	scene.storm.on_swing(false)
+	await physics_wait(0.04)
+	check(scene.storm.volley_count == 0 and scene.storm.meteor_count == 0 and scene.storm.blades.is_empty(), "Neither locked passive can launch or instantiate an active sword formation")
+	scene.progression.skills.meteor = 1
+	scene.storm.meteor_chance = 1.0
+	scene.storm.on_swing(false)
+	check(scene.storm.meteor_count == 1 and scene.storm.volley_count == 0 and scene.storm.blades.is_empty(), "Meteor unlocks independently without unlocking swords")
+	await physics_wait(1.1)
+	check(scene.storm.meteor_hits > 0 and target.health < 10000.0 and scene.storm.meteor_rolls == 1 and scene.storm.meteor_count == 1, "A real meteor lands without recursively rolling auxiliary skills")
+	await prepare(false)
+	target = enemy_at(Vector3(0, 0.04, -4.0), 10000.0)
+	target.stats.physical_defense = 10000.0
+	target.stats.magic_defense = 10000.0
+	scene.progression.skills.swords = 1
+	scene.storm.refresh_skills()
+	var original_ids := blade_ids()
+	check(original_ids.size() == 8 and scene.storm.slots.size() == 8, "Unlocking swords instantiates exactly eight source-asset blades")
 	var peak := 0
-	var trips: Dictionary = {}
-	same_instances = true
-	for i in 35:
-		await wait(0.1)
-		peak = maxi(peak, scene.storm.active_swords)
-		same_instances = same_instances and formation_is_consistent(original_blades)
-		for flight in scene.storm.flights:
-			var blade_id: int = flight.blade.get_instance_id()
-			var path_id: int = flight.path.get_instance_id()
-			var paths: Array = trips.get(blade_id, [])
-			if not paths.has(path_id):
-				paths.append(path_id)
-			trips[blade_id] = paths
-	hold.pressed = false
-	Input.parse_input_event(hold)
-	var reused := false
-	for paths in trips.values():
-		reused = reused or paths.size() >= 2
-	check(scene.player.attack_count >= 4 and scene.storm.volley_count >= 4 and peak > 0 and peak <= 8 and same_instances and reused, "Held attack repeatedly relaunches the same eight blades after their return without cloning")
-	await wait(2.2)
-	check(formation_is_consistent(original_blades, true), "Releasing held attack returns all eight original blades rather than deleting the projectiles")
+	for attempt in 4:
+		scene.storm.on_swing(false)
+		for frame in 36:
+			await get_tree().physics_frame
+			peak = maxi(peak, scene.storm.active_swords)
+	await physics_wait(2.0)
+	var returned: bool = scene.storm.active_swords == 0 and blade_ids() == original_ids
+	for index in scene.storm.blades.size():
+		returned = returned and scene.storm.blades[index].get_parent() == scene.storm.slots[index]
+	check(peak > 0 and peak <= 8 and scene.storm.blades.size() == 8, "Repeated volleys never create more than the eight physical blades")
+	check(scene.storm.sword_hits > 0 and target.health < 10000.0 and scene.storm.meteor_count == 0, "Fixed-damage swords hit through high double defense without unlocking meteor")
+	check(returned, "The same eight blade instances return to their formation after attacks")
 
-func check_outfit() -> void:
-	var original := preload("res://assets/characters/Knight.glb").instantiate()
-	var outfit := preload("res://assets/characters/Rogue.glb").instantiate()
-	var current := scene.player.get_node("Visual/Model/Rig/Skeleton3D") as Skeleton3D
-	var original_rig := original.get_node("Rig/Skeleton3D") as Skeleton3D
-	var outfit_rig := outfit.get_node("Rig/Skeleton3D") as Skeleton3D
-	var compatible := current.get_bone_count() == 41 and outfit_rig.get_bone_count() == 41
-	for bone in current.get_bone_count():
-		compatible = compatible and current.get_bone_name(bone) == outfit_rig.get_bone_name(bone) and original_rig.get_bone_rest(bone).is_equal_approx(outfit_rig.get_bone_rest(bone))
-	check(compatible, "Outfit uses the same 41-bone rig and authored rest poses without retargeting")
-	var garments_replaced := true
-	for part in ["Body", "ArmLeft", "ArmRight", "LegLeft", "LegRight"]:
-		var equipped := current.get_node("Knight_" + part) as MeshInstance3D
-		var donor := outfit_rig.get_node("Rogue_" + part) as MeshInstance3D
-		garments_replaced = garments_replaced and equipped.mesh == donor.mesh and equipped.skin == donor.skin
-	check(garments_replaced and current.get_node("chest/Knight_Cape").mesh == outfit_rig.get_node("chest/Rogue_Cape").mesh, "All five garments and the cape use the new authored models")
-	check(current.get_node("Knight_Head").mesh == original_rig.get_node("Knight_Head").mesh and current.get_node("head/Knight_Helmet").mesh == original_rig.get_node("head/Knight_Helmet").mesh, "The same knight keeps the original head and helmet")
-	check(scene.player.sword.name == &"2H_Sword" and scene.player.sword.visible and not current.get_node("handslot_r/1H_Sword").visible and scene.player.sword.get_parent() is BoneAttachment3D, "One new greatsword is visible on the original animated hand attachment")
-	original.free()
-	outfit.free()
+func check_crowd_hits() -> void:
+	await prepare(false)
+	var crowd: Array[ArenaEnemy] = []
+	for index in 40:
+		var angle := TAU * float(index) / 40.0
+		crowd.append(enemy_at(Vector3(cos(angle) * 1.9, 0.04, sin(angle) * 1.9), 500.0))
+	await physics_wait(0.04)
+	scene.player.request_skill()
+	await physics_wait(0.8)
+	var damaged := 0
+	for target: ArenaEnemy in crowd:
+		if target.health == 445.0:
+			damaged += 1
+	check(damaged == 40 and scene.hit_count == 40, "A native ring attack hits all 40 overlapping enemies once, not just 32")
+	check(scene.hud.popups.size() <= scene.hud.MAX_POPUPS and scene.shake_power <= 0.06, "Crowd hit feedback stays bounded instead of multiplying shake and popups indefinitely")
+	await prepare(false)
+	crowd.clear()
+	for index in 40:
+		var angle := TAU * float(index) / 40.0
+		crowd.append(enemy_at(Vector3(cos(angle), 0.04, -5.0 + sin(angle)), 500.0))
+	scene.progression.skills.meteor = 1
+	await physics_wait(0.04)
+	scene.storm._call_meteor(crowd[0])
+	await physics_wait(1.1)
+	check(scene.storm.meteor_hits == 40, "The meteor query resolves all 40 targets beyond the old 32-body query limit")
 
-func showcase_hold(seconds: float) -> void:
-	# Sustain only the recorded input, even if the desktop focus changes during capture.
-	# Actual physical-key holding is exercised independently by the verification suite.
-	var timer := get_tree().create_timer(seconds)
-	while timer.time_left > 0.0:
-		Input.action_press("attack")
-		await get_tree().physics_frame
-	Input.action_release("attack")
+func check_restart() -> void:
+	await prepare(false)
+	var target := enemy_at(Vector3(0, 0.04, -4.0), 10000.0, "ranged")
+	scene.progression.skills.swords = 1
+	scene.progression.skills.meteor = 1
+	scene.progression.skills.ghost = 1
+	scene.storm.refresh_skills()
+	scene.storm.on_swing(true)
+	scene.storm._call_meteor(target)
+	scene.player.request_ghost()
+	target._launch_projectile(Vector3.RIGHT, 6.0, 1.0)
+	var enemy_id := target.get_instance_id()
+	var old_feedback_id: int = scene.feedback.get_instance_id()
+	var old_blades := blade_ids()
+	var dropped := enemy_at(Vector3(7, 0.04, 0), 1.0)
+	scene.player.deal_damage(dropped, 2, 100.0, 0)
+	await physics_wait(0.04)
+	scene.progression.add_experience(100)
+	check(scene.state == "choosing" and scene.progression.pending_levels > 0 and not scene.storm.meteors.is_empty() and scene.drops.get_child_count() > 0, "Reset fixture contains pending upgrades, a dropped pickup and in-flight effects")
+	scene.restart()
+	scene.director.enabled = false
+	scene.director._spawn_timer.stop()
+	check(scene.state == "playing" and not get_tree().paused and scene.ready_to_play, "Restart synchronously returns the existing scene to play")
+	check(scene.enemies.get_child_count() == 0 and scene.drops.get_child_count() == 0 and scene.director.get_alive_count() == 0 and scene.director._pending.is_empty(), "Restart clears all enemy, projectile, drop and scheduled-spawn owners")
+	check(scene.storm.active_swords == 0 and scene.storm.meteors.is_empty() and scene.storm.blades.is_empty(), "Restart removes in-flight swords, meteor state and the now-locked formation")
+	check(scene.progression.level == 1 and scene.progression.xp == 0 and scene.progression.pending_levels == 0 and scene.progression.choices.is_empty(), "Restart clears level, XP and every pending choice")
+	check(scene.player.health == scene.player.stats.max_health and not scene.player.dead and not scene.player.ghost_active and scene.player.skill_cooldown == 0.0 and scene.player.ghost_cooldown == 0.0 and scene.defeat_count == 0 and scene.hit_count == 0, "Restart resets health, death, buffs, cooldowns and run counters")
+	await physics_wait(0.05)
+	var freed := not is_instance_id_valid(enemy_id) and not is_instance_id_valid(old_feedback_id)
+	for blade_id: int in old_blades:
+		freed = freed and not is_instance_id_valid(blade_id)
+	check(freed, "Old enemies, effect-owned tweens and formation instances are actually freed")
+	await physics_wait(1.1)
+	check(scene.enemies.get_child_count() == 0 and scene.drops.get_child_count() == 0 and scene.hit_count == 0 and scene.player.health == scene.player.stats.max_health, "Cancelled old impacts and pickups cannot reappear after restart")
 
-func showcase() -> void:
-	await wait(2.5)
-	# Reproducible native gameplay; keep default probability, damage and target health.
-	scene.storm.rng.seed = 41
-	# Show the new melee chain clearly before layering the existing sword formation.
-	press("sword_storm")
-	await wait(0.4)
-	await showcase_hold(3.5)
-	await wait(0.7)
-	press("ghost_state")
-	await wait(0.8)
-	await showcase_hold(5.0)
-	await wait(0.7)
-	press("sword_storm")
-	await wait(0.2)
-	await showcase_hold(3.5)
-	await wait(0.7)
-	press("skill")
-	await wait(1.3)
-	press("ghost_state")
-	await wait(1.2)
-	print("SHOWCASE hits=", scene.hit_count, " defeats=", scene.defeat_count, " attacks=", scene.player.attack_count, " volleys=", scene.storm.volley_count, " meteors=", scene.storm.meteor_count)
-	get_tree().quit()
+func check_waves_and_endings() -> void:
+	scene.restart()
+	scene.player.auto_attack = false
+	await physics_wait(0.35)
+	check(scene.director._pending.size() == 3 and scene.director.get_alive_count() == 0, "The opening wave has a visible timed warning before its three enemies enter")
+	await physics_wait(0.85)
+	var safe := true
+	for enemy: Node3D in scene.director._alive:
+		safe = safe and enemy.global_position.distance_to(scene.player.global_position) >= 6.0
+	check(scene.director.get_alive_count() == 3 and safe, "The first real wave enters from the perimeter at a safe distance")
+	scene.director.elapsed = 119.99
+	await physics_wait(0.04)
+	check(scene.director._elite_done[0], "The authored two-minute boundary schedules its elite only once")
+	await physics_wait(0.9)
+	var elites := 0
+	for enemy: Node3D in scene.director._alive:
+		if enemy.elite:
+			elites += 1
+	check(elites == 1, "The scheduled elite enters through the real warning timer")
+	scene.director.elapsed = scene.director.duration - 0.01
+	await physics_wait(1.0)
+	check(is_instance_valid(scene.boss) and scene.boss.boss and scene.director._boss_scheduled, "The ten-minute boundary spawns the final boss")
+	if not is_instance_valid(scene.boss):
+		return
+	var boss_id: int = scene.boss.get_instance_id()
+	await physics_wait(1.1)
+	var bosses := 0
+	for enemy: Node3D in scene.director._alive:
+		if enemy.boss:
+			bosses += 1
+	check(bosses == 1 and scene.boss.get_instance_id() == boss_id and scene.director._spawn_timer.is_stopped(), "The final boss is not duplicated and ordinary spawning stops")
+	var kills: int = scene.defeat_count
+	var boss_health: float = scene.boss.health
+	var result: Dictionary = scene.player.deal_damage(scene.boss, DamageRules.Kind.FIXED, 100000.0, 0)
+	check(result.lethal and result.actual == boss_health and scene.defeat_count == kills + 1 and scene.state == "won", "An actual boss kill enters victory exactly once with clamped actual damage")
+	check(get_tree().paused and scene.hud.result_panel.visible and not scene.player.enabled, "Victory freezes combat and displays the result panel")
+	scene.boss.receive_damage({"damage": 10000, "dodged": false}, Vector3.ZERO)
+	scene._finish(false)
+	check(scene.state == "won" and scene.defeat_count == kills + 1, "A repeated boss hit or late loss cannot replace the completed victory")
+	await capture("end-won")
+	await prepare(false)
+	var attacker := BattleStats.new()
+	attacker.independent_attack = 100000.0
+	scene.player.receive_damage(DamageRules.calculate(attacker, scene.player.stats, 2, 1.0, 0, 1.0, 1.0), Vector3.ZERO)
+	check(scene.state == "lost" and scene.player.dead and scene.player.health == 0.0 and get_tree().paused and scene.hud.result_panel.visible, "Real lethal damage ends the run without a target-dummy respawn")
+	await capture("end-lost")
+	scene.restart()
+	check(scene.state == "playing" and not scene.player.dead and scene.player.health == 120.0 and not scene.hud.result_panel.visible, "The same scene can restart cleanly after defeat")
+
+func check_short_load() -> void:
+	await prepare(true)
+	scene.player.stats.max_health = 100000.0
+	scene.player.health = 100000.0
+	scene.progression.skills.swords = 1
+	scene.progression.skills.meteor = 1
+	scene.progression.skills.ghost = 1
+	scene.storm.refresh_skills()
+	scene.player.request_ghost()
+	for index in performance_enemies:
+		var angle := TAU * float(index) / float(performance_enemies)
+		var radius := 2.5 + float(index % 6) * 0.8
+		var kind := "ranged" if index % 6 == 0 else ("charger" if index % 4 == 0 else "chaser")
+		enemy_at(Vector3(cos(angle) * radius, 0.04, sin(angle) * radius), 50000.0, kind, true)
+	await physics_wait(0.25)
+	wall_frame_ms.clear()
+	simulation_frame_ms.clear()
+	last_frame_us = 0
+	recording = true
+	var load_started := Time.get_ticks_msec()
+	for action: String in ["move_right", "move_up", "move_left", "move_down"]:
+		Input.action_press(action)
+		scene.player.skill_cooldown = 0.0
+		scene.player.request_skill()
+		await physics_wait(1.25)
+		Input.action_release(action)
+	recording = false
+	performance = {
+		"requested": true,
+		"scope": "headless_logic_load_only_not_rendered_fps" if headless else "rendered_short_fixture_not_target_hardware_guarantee",
+		"fixture": "Real AI enemies, all three optional skills unlocked, movement and one forced active cast per 1.25 seconds; elevated health prevents upgrade/death pauses.",
+		"requested_enemies": performance_enemies,
+		"remaining_enemies": get_tree().get_nodes_in_group("enemies").size(),
+		"simulation_seconds": 5.0,
+		"wall_seconds": float(Time.get_ticks_msec() - load_started) / 1000.0,
+		"wall_frame_ms": summarize(wall_frame_ms),
+		"simulation_delta_ms": summarize(simulation_frame_ms),
+		"max_draw_calls": max_draw_calls,
+		"max_nodes": max_nodes,
+		"max_active_swords": max_active_swords,
+		"max_active_meteors": max_active_meteors,
+	}
+	check(scene.state == "playing" and not get_tree().paused, "The short crowd-load fixture completes without a state lock or unexpected upgrade pause")
+	check(max_active_swords <= 8 and max_active_meteors <= 2, "Crowd-load auxiliary concurrency stays within its authored limits")
+	await capture("crowd-%d" % performance_enemies)
+
+func summarize(values: Array[float]) -> Dictionary:
+	if values.is_empty():
+		return {"samples": 0}
+	var sorted := values.duplicate()
+	sorted.sort()
+	return {"samples": sorted.size(), "median": sorted[int((sorted.size() - 1) * 0.5)], "p95": sorted[int((sorted.size() - 1) * 0.95)], "max": sorted.back()}
+
+func finish_report() -> void:
+	release_movement()
+	var report := {
+		"schema": "roguelite-verification-1",
+		"engine": Engine.get_version_info().string,
+		"renderer": RenderingServer.get_current_rendering_method(),
+		"adapter": RenderingServer.get_video_adapter_name(),
+		"headless": headless,
+		"frame_limit": requested_fps,
+		"physics_ticks_per_second": Engine.physics_ticks_per_second,
+		"duration_seconds": float(Time.get_ticks_msec() - started_ms) / 1000.0,
+		"passed": checks,
+		"failed": failures,
+		"captures": captures,
+		"viewport": str(get_viewport().get_visible_rect().size),
+		"performance": performance,
+		"limitations": "Headless runs verify logic, not rendered FPS. A short synthetic crowd fixture does not establish long-session stability, target-hardware performance, controller feel or visual approval.",
+	}
+	var mode := "headless" if headless else "rendered"
+	for path: String in ["res://artifacts/roguelite-verification.json", "res://artifacts/roguelite-verification-%dfps-%s.json" % [requested_fps, mode]]:
+		var output := FileAccess.open(path, FileAccess.WRITE)
+		if output != null:
+			output.store_string(JSON.stringify(report, "\t"))
+			output.close()
+		else:
+			push_error("Could not write verification report: " + path)
+	print("ROGUELITE_VERIFICATION ", JSON.stringify(report))
+	get_tree().quit(0 if failures.is_empty() else 1)

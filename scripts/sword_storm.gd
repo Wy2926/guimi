@@ -5,12 +5,13 @@ const RANGE := 8.5
 const SWORD_SCENE := preload("res://assets/weapons/niko_katana/sword.tscn")
 const MAX_ACTIVE_SWORDS := 8
 const VOLLEY_INTERVAL := 0.24
-const SWORD_DAMAGE := 5
-const METEOR_DAMAGE := 32
 const METEOR_RADIUS := 3.2
 const METEOR_DELAY := 0.9
 
-@onready var arena: Node3D = get_parent()
+var player: DuelFighter
+var progression: RunProgression
+var feedback: Node3D
+var camera: Camera3D
 var active := true
 var active_swords: int:
 	get: return flights.size()
@@ -43,7 +44,12 @@ func _ready() -> void:
 	blast.radius = METEOR_RADIUS
 	meteor_query.shape = blast
 	meteor_query.collision_mask = 4
-	_make_halo()
+	refresh_skills()
+
+func refresh_skills() -> void:
+	if player.enabled and progression.skill_level("swords") > 0 and not is_instance_valid(halo):
+		_make_halo()
+		feedback.storm_activate(player.global_position)
 
 func _make_halo() -> void:
 	halo = Node3D.new()
@@ -58,19 +64,13 @@ func _make_halo() -> void:
 		slot.add_child(blade)
 		blades.append(blade)
 	# A single gentle emitter for the formation, not eight particle systems.
-	var motes: GPUParticles3D = arena.feedback.attach_trail(halo, Color("78c9dc"), 24, 0.75)
+	var motes: GPUParticles3D = feedback.attach_trail(halo, Color("78c9dc"), 24, 0.75)
 	motes.position = Vector3(0, 2.8, 0)
 	var process := motes.process_material as ParticleProcessMaterial
 	process.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_BOX
 	process.emission_box_extents = Vector3(2.0, 0.65, 0.05)
 	halo.visible = active
 	motes.emitting = active
-
-func set_active(value: bool) -> void:
-	active = value
-	reset()
-	if value and arena.ready_to_play:
-		arena.feedback.storm_activate(arena.player.global_position)
 
 func reset() -> void:
 	# Killing these bound tweens also cancels every pending impact on reset/toggle.
@@ -83,6 +83,7 @@ func reset() -> void:
 	meteors.clear()
 	blades.clear()
 	slots.clear()
+	halo = null
 	fire_left = 0.0
 	volley_left = 0.0
 	volley_count = 0
@@ -92,57 +93,63 @@ func reset() -> void:
 	meteor_hits = 0
 	target_cursor = 0
 	blade_cursor = 0
-	_make_halo()
+	refresh_skills()
 
 func on_swing(heavy: bool) -> void:
-	if not active or not arena.ready_to_play or arena.player.dead:
+	if not active or not player.enabled or player.dead:
 		return
-	fire_left = 0.66 if heavy else 0.42
+	refresh_skills()
 	var targets := _targets()
 	if targets.is_empty():
 		return
-	if volley_left <= 0.0:
-		_fire_volley(targets)
+	if progression.skill_level("swords") > 0:
+		fire_left = 0.66 if heavy else 0.42
+		if volley_left <= 0.0:
+			_fire_volley(targets)
 	# Only the authored player's swing rolls this once. Auxiliary hits never call it.
-	meteor_rolls += 1
-	if rng.randf() < meteor_chance and meteors.size() < 2:
-		_call_meteor(targets[rng.randi_range(0, targets.size() - 1)])
+	if progression.skill_level("meteor") > 0:
+		meteor_rolls += 1
+		if rng.randf() < meteor_chance and meteors.size() < 2:
+			_call_meteor(targets[rng.randi_range(0, targets.size() - 1)])
 
-func _targets() -> Array[DuelFighter]:
-	var targets: Array[DuelFighter] = []
+func _targets() -> Array[Node3D]:
+	var targets: Array[Node3D] = []
 	for candidate in get_tree().get_nodes_in_group("enemies"):
-		if candidate is DuelFighter and not candidate.dead and candidate.is_visible_in_tree() and candidate.global_position.distance_to(arena.player.global_position) <= RANGE:
+		if not candidate.dead and candidate.is_visible_in_tree() and candidate.global_position.distance_to(player.global_position) <= RANGE * player.stats.range_multiplier:
 			targets.append(candidate)
 	return targets
 
 func _physics_process(delta: float) -> void:
 	clock += delta
-	if arena.player.dead:
+	if player.dead or not player.enabled:
 		if fire_left > 0.0 or not flights.is_empty() or not meteors.is_empty():
 			reset()
-		halo.hide()
+		if is_instance_valid(halo):
+			halo.hide()
 		return
-	halo.visible = active
-	halo.global_position = arena.player.global_position - arena.player.facing * 0.85
+	refresh_skills()
 	# Keep the fan behind the fighter, but open its plane toward the fixed camera
 	# so eight separate blades remain readable instead of collapsing edge-on.
-	var to_camera: Vector3 = arena.camera.global_position - halo.global_position
-	halo.rotation.y = atan2(to_camera.x, to_camera.z)
-	for i in slots.size():
-		var angle := lerpf(-1.12, 1.12, float(i) / 7.0)
-		slots[i].position = Vector3(sin(angle) * 2.45, 2.6 + cos(angle) * 0.8 + sin(clock * 1.8 + i) * 0.07, 0)
-		slots[i].rotation.z = -angle * 0.48
-	if not active or not arena.ready_to_play:
+	if is_instance_valid(halo):
+		halo.visible = active
+		halo.global_position = player.global_position - player.facing * 0.85
+		var to_camera: Vector3 = camera.global_position - halo.global_position
+		halo.rotation.y = atan2(to_camera.x, to_camera.z)
+		for i in slots.size():
+			var angle := lerpf(-1.12, 1.12, float(i) / 7.0)
+			slots[i].position = Vector3(sin(angle) * 2.45, 2.6 + cos(angle) * 0.8 + sin(clock * 1.8 + i) * 0.07, 0)
+			slots[i].rotation.z = -angle * 0.48
+	if not active:
 		return
 	volley_left = maxf(0.0, volley_left - delta)
 	fire_left = maxf(0.0, fire_left - delta)
-	if fire_left > 0.0 and volley_left <= 0.0:
+	if progression.skill_level("swords") > 0 and fire_left > 0.0 and volley_left <= 0.0:
 		_fire_volley(_targets())
 	_advance_swords(delta)
 	_advance_meteors(delta)
 
-func _fire_volley(targets: Array[DuelFighter]) -> void:
-	if targets.is_empty():
+func _fire_volley(targets: Array[Node3D]) -> void:
+	if targets.is_empty() or blades.is_empty():
 		return
 	volley_left = VOLLEY_INTERVAL
 	var launched := 0
@@ -161,7 +168,7 @@ func _fire_volley(targets: Array[DuelFighter]) -> void:
 	if launched > 0:
 		volley_count += 1
 
-func _launch_sword(target: DuelFighter, slot: int) -> void:
+func _launch_sword(target: Node3D, slot: int) -> void:
 	var start := blades[slot].global_position
 	var contact := target.global_position + Vector3.UP * 1.05
 	var direction := (contact - start).normalized()
@@ -184,8 +191,8 @@ func _launch_sword(target: DuelFighter, slot: int) -> void:
 	var blade := blades[slot]
 	blade.reparent(follow)
 	blade.position = Vector3.ZERO
-	arena.feedback.storm_muzzle(start)
-	var trail: GPUParticles3D = arena.feedback.attach_trail(follow, Color("f3cd8d") if slot % 3 == 0 else Color("77dcff"), 28, 0.28)
+	feedback.storm_muzzle(start)
+	var trail: GPUParticles3D = feedback.attach_trail(follow, Color("f3cd8d") if slot % 3 == 0 else Color("77dcff"), 28, 0.28)
 	# Native velocity-aligned particles overlap into a readable curved light wake.
 	var wake := trail.draw_pass_1 as SphereMesh
 	wake.radius = 0.018
@@ -248,31 +255,32 @@ func _advance_swords(delta: float) -> void:
 		if flight.returning:
 			flight.path.curve.set_point_position(2, slots[flight.slot].global_position)
 			continue
-		var target := flight.target as DuelFighter
 		# Gently update only the destination while the blade is approaching; its curved
 		# launch stays intact. Once it passes the target it continues through, not orbiting.
-		if is_instance_valid(target) and not target.dead and follow.progress_ratio < 0.67:
+		if is_instance_valid(flight.target) and not flight.target.dead and follow.progress_ratio < 0.67:
+			var target: Node3D = flight.target
 			var contact := target.global_position + Vector3.UP * 1.05
 			flight.path.curve.set_point_position(2, contact)
 			flight.path.curve.set_point_position(3, contact + flight.through)
 		sword_query.transform = Transform3D(Basis.IDENTITY, follow.global_position)
-		for result in get_world_3d().direct_space_state.intersect_shape(sword_query, 16):
-			var body := result.collider as DuelFighter
+		for result in get_world_3d().direct_space_state.intersect_shape(sword_query, 128):
+			var body := result.collider as Node3D
 			if not is_instance_valid(body) or body.dead or not body.is_visible_in_tree() or body.get_instance_id() in flight.hit_ids:
 				continue
 			flight.hit_ids.append(body.get_instance_id())
-			var direction: Vector3 = flight.through.normalized()
-			var lethal := body.receive_hit(SWORD_DAMAGE, direction, false, true)
-			sword_hits += 1
-			var point := body.global_position + Vector3.UP * 1.15
-			arena.feedback.storm_hit(point, direction, lethal)
-			_confirm_hit(point, SWORD_DAMAGE, lethal, "飞剑")
+			var definition := progression.skill("swords")
+			var hit := player.deal_damage(body, definition.kind, progression.coefficient("swords"), definition.element, false, true, "飞剑")
+			if hit.get("actual", 0) > 0:
+				sword_hits += 1
 
-func _call_meteor(target: DuelFighter) -> void:
+func _call_meteor(target: Node3D) -> void:
+	if not player.enabled or progression.skill_level("meteor") == 0:
+		return
 	meteor_count += 1
 	var point := target.global_position
 	point.y = 0.08
-	var warning: MeshInstance3D = arena.feedback.meteor_warning(point, METEOR_DELAY)
+	var radius := METEOR_RADIUS * player.stats.range_multiplier
+	var warning: MeshInstance3D = feedback.meteor_warning(point, METEOR_DELAY, radius)
 	# Keep the warning with its gameplay owner so toggling/death also cancels it.
 	warning.reparent(self)
 	var meteor := Node3D.new()
@@ -284,10 +292,10 @@ func _call_meteor(target: DuelFighter) -> void:
 	rock.radial_segments = 8
 	rock.rings = 4
 	core.mesh = rock
-	core.material_override = arena.feedback._emissive(Color("ffb95d"), 4.0)
+	core.material_override = feedback._emissive(Color("ffb95d"), 4.0)
 	core.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	meteor.add_child(core)
-	var trail: GPUParticles3D = arena.feedback.attach_trail(meteor, Color("ffad52"), 80, 0.48)
+	var trail: GPUParticles3D = feedback.attach_trail(meteor, Color("ffad52"), 80, 0.48)
 	var process := trail.process_material as ParticleProcessMaterial
 	process.scale_min *= 2.8
 	process.scale_max *= 3.2
@@ -295,7 +303,7 @@ func _call_meteor(target: DuelFighter) -> void:
 	meteor.global_position = start
 	var descent := meteor.create_tween().set_process_mode(Tween.TWEEN_PROCESS_PHYSICS)
 	descent.tween_property(meteor, "global_position", point, METEOR_DELAY).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
-	meteors.append({"node": meteor, "core": core, "trail": trail, "position": point, "start": start, "left": METEOR_DELAY})
+	meteors.append({"node": meteor, "core": core, "trail": trail, "position": point, "start": start, "left": METEOR_DELAY, "radius": radius})
 
 func _advance_meteors(delta: float) -> void:
 	for i in range(meteors.size() - 1, -1, -1):
@@ -304,31 +312,22 @@ func _advance_meteors(delta: float) -> void:
 		if meteor.left > 0.0:
 			continue
 		var point: Vector3 = meteor.position
-		arena.feedback.meteor_impact(point)
+		feedback.meteor_impact(point, float(meteor.radius) / METEOR_RADIUS)
+		meteor_query.shape.radius = meteor.radius
 		meteor_query.transform = Transform3D(Basis.IDENTITY, point + Vector3.UP * 0.6)
-		for result in get_world_3d().direct_space_state.intersect_shape(meteor_query, 16):
-			var body := result.collider as DuelFighter
-			if not is_instance_valid(body) or body.dead or not body.is_visible_in_tree():
+		var hit_ids: Array[int] = []
+		for result in get_world_3d().direct_space_state.intersect_shape(meteor_query, 128):
+			var body := result.collider as Node3D
+			if not is_instance_valid(body) or body.dead or not body.is_visible_in_tree() or body.get_instance_id() in hit_ids:
 				continue
-			var direction := (body.global_position - point).normalized()
-			direction.y = 0.0
-			if direction.length_squared() < 0.01:
-				direction = arena.player.facing
-			var lethal := body.receive_hit(METEOR_DAMAGE, direction, true)
-			body.flash_material.set_shader_parameter("tint", Color("ffc36f"))
-			meteor_hits += 1
-			_confirm_hit(body.global_position + Vector3.UP * 1.3, METEOR_DAMAGE, lethal, "流星")
-		arena.shake_time = 0.22
-		arena.shake_power = 0.075
+			hit_ids.append(body.get_instance_id())
+			var definition := progression.skill("meteor")
+			var hit := player.deal_damage(body, definition.kind, progression.coefficient("meteor"), definition.element, true, false, "流星")
+			if hit.get("actual", 0) > 0:
+				meteor_hits += 1
 		meteor.core.hide()
 		meteor.trail.emitting = false
 		var fade: Tween = meteor.node.create_tween()
 		fade.tween_interval(0.5)
 		fade.tween_callback(meteor.node.queue_free)
 		meteors.remove_at(i)
-
-func _confirm_hit(point: Vector3, damage: int, lethal: bool, source: String) -> void:
-	arena.hit_count += 1
-	if lethal:
-		arena.defeat_count += 1
-	arena.hud.hit(point, lethal, damage, true, source)

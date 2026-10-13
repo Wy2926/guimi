@@ -1,6 +1,7 @@
 @tool
 extends Node3D
 ## Small set dressing made entirely from Godot primitive meshes and materials.
+@export var radius := 15.8
 
 func _ready() -> void:
 	var stone := _material(Color("24363d"), 0.88)
@@ -10,31 +11,32 @@ func _ready() -> void:
 	glow.emission_enabled = true
 	glow.emission = Color("ffb958")
 	glow.emission_energy_multiplier = 2.0
-	_cylinder("Foundation", 6.85, 0.75, Vector3(0, -0.64, 0), edge, 64)
-	_cylinder("LowerLip", 6.96, 0.15, Vector3(0, -0.87, 0), stone, 64)
-	_cylinder("BrassBand", 6.88, 0.07, Vector3(0, -0.38, 0), brass, 64)
-	_cylinder("UpperRim", 6.70, 0.3, Vector3(0, -0.17, 0), stone, 64)
+	_cylinder("Foundation", radius + 0.60, 0.75, Vector3(0, -0.64, 0), edge, 64)
+	_cylinder("LowerLip", radius + 0.71, 0.15, Vector3(0, -0.87, 0), stone, 64)
+	_cylinder("BrassBand", radius + 0.63, 0.07, Vector3(0, -0.38, 0), brass, 64)
+	_cylinder("UpperRim", radius + 0.45, 0.3, Vector3(0, -0.17, 0), stone, 64)
 	var floor_mat := ShaderMaterial.new()
 	floor_mat.shader = preload("res://shaders/stone.gdshader")
-	_cylinder("Courtyard", 6.25, 0.15, Vector3(0, -0.065, 0), floor_mat, 96)
-	_ring("InnerInlay", 6.15, 0.022, 0.025, brass)
-	_ring("OuterInlay", 6.55, 0.026, 0.02, brass)
+	_cylinder("Courtyard", radius, 0.15, Vector3(0, -0.065, 0), floor_mat, 96)
+	_ring("InnerInlay", radius - 0.10, 0.022, 0.025, brass)
+	_ring("OuterInlay", radius + 0.30, 0.026, 0.02, brass)
+	_ring("CenterInlay", 4.2, 0.014, 0.025, brass)
 	for i in 48:
 		var a := i * TAU / 48.0
-		var pos := Vector3(sin(a), 0, cos(a)) * 6.38
+		var pos := Vector3(sin(a), 0, cos(a)) * (radius + 0.13)
 		pos.y = 0.045
 		var marker := _box("RimMark", Vector3(0.024, 0.018, 0.19 if i % 4 else 0.3), pos, brass)
 		marker.rotation.y = a
 	for i in 16:
 		var a := i * TAU / 16.0
-		var pos := Vector3(sin(a), 0, cos(a)) * 6.86
+		var pos := Vector3(sin(a), 0, cos(a)) * (radius + 0.61)
 		pos.y = -0.61
 		var inset := _box("FoundationInset", Vector3(0.33, 0.26, 0.06), pos, brass)
 		inset.rotation.y = a
 	# Four low braziers, outside the playable disk: no navigational clutter.
 	for i in 4:
 		var a := PI * 0.25 + float(i) * PI * 0.5
-		var pos := Vector3(sin(a), 0, cos(a)) * 6.38
+		var pos := Vector3(sin(a), 0, cos(a)) * (radius + 0.13)
 		_cylinder("BrazierFoot", 0.36, 0.16, pos + Vector3.UP * 0.10, edge, 8)
 		_cylinder("BrazierColumn", 0.22, 0.65, pos + Vector3.UP * 0.45, stone, 8)
 		_cylinder("BrazierCollar", 0.25, 0.09, pos + Vector3.UP * 0.76, brass, 8)
@@ -53,11 +55,11 @@ func _ready() -> void:
 		var a := i * TAU / 32.0
 		var wall := StaticBody3D.new()
 		wall.collision_layer = 1
-		wall.position = Vector3(sin(a) * 6.25, 0.6, cos(a) * 6.25)
+		wall.position = Vector3(sin(a) * radius, 0.6, cos(a) * radius)
 		wall.rotation.y = a
 		var collider := CollisionShape3D.new()
 		var box := BoxShape3D.new()
-		box.size = Vector3(1.28, 2.0, 0.2)
+		box.size = Vector3(TAU * radius / 32.0 + 0.08, 2.0, 0.2)
 		collider.shape = box
 		wall.add_child(collider)
 		add_child(wall)

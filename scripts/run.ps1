@@ -2,7 +2,9 @@ param(
     [string]$Godot,
     [switch]$Editor,
     [switch]$Verify,
-    [ValidateSet(60, 120)][int]$VerifyFps = 120
+    [ValidateSet(60, 120)][int]$VerifyFps = 120,
+    [ValidateRange(1, 80)][int]$PerfEnemies = 80,
+    [switch]$Headless
 )
 $ErrorActionPreference = 'Stop'
 $projectPath = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
@@ -27,10 +29,10 @@ if (!(Test-Path -LiteralPath (Join-Path $projectPath '.godot\imported'))) {
     if ($LASTEXITCODE -ne 0) { throw 'Godot asset import failed.' }
 }
 $arguments = @('--path', $projectPath)
+if ($Headless) { $arguments += '--headless' }
 if ($Editor) { $arguments += '--editor' }
 if ($Verify) {
-    $arguments += @('--', '--verify')
-    if ($VerifyFps -eq 60) { $arguments += '--fps60' }
+    $arguments += @('--', '--verify', "--fps=$VerifyFps", "--perf-enemies=$PerfEnemies")
 }
 & $engine @arguments | Out-Host
 if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) {

@@ -19,6 +19,8 @@ var random := RandomNumberGenerator.new()
 var _last_storm_sound := -1000
 
 func sound(key: String, pos: Vector3, volume := -5.0, pitch := 1.0) -> void:
+	if DisplayServer.get_name() == "headless":
+		return
 	var audio := AudioStreamPlayer3D.new()
 	audio.stream = SOUNDS[key]
 	audio.bus = &"SFX"
@@ -96,6 +98,7 @@ func slash(fighter: DuelFighter, style: String = "horizontal", ghost: bool = fal
 			sweep = 0.0
 	if finisher:
 		diameter += 0.6
+	diameter *= fighter.stats.range_multiplier
 	var layers := 3 if ghost and finisher else 2
 	for layer in layers:
 		var arc := MeshInstance3D.new()
@@ -206,7 +209,7 @@ func skill_charge(fighter: DuelFighter) -> void:
 	sound("charge", fighter.global_position, -16.0, 1.5)
 	var pos := fighter.global_position
 	pos.y = 0.07
-	_energy_wave(pos, 4.8, DuelFighter.SKILL_SWING, true)
+	_energy_wave(pos, 4.8 * fighter.stats.range_multiplier, DuelFighter.SKILL_SWING, true)
 	var motes := _burst(pos + Vector3.UP * 0.65, Vector3.UP, 24, Color("70e8ff"), 0.34, 0.1, 0.045)
 	var process := motes.process_material as ParticleProcessMaterial
 	process.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_RING
@@ -223,6 +226,7 @@ func skill_spin(fighter: DuelFighter) -> void:
 	var pivot := Node3D.new()
 	add_child(pivot)
 	pivot.global_position = fighter.global_position + Vector3.UP * 1.12
+	pivot.scale = Vector3.ONE * fighter.stats.range_multiplier * (1.3 if fighter.ghost_active else 1.0)
 	pivot.rotation.y = atan2(fighter.attack_direction.x, fighter.attack_direction.z) + 0.6
 	for i in 2:
 		var arc := MeshInstance3D.new()
@@ -248,7 +252,7 @@ func skill_spin(fighter: DuelFighter) -> void:
 func skill_release(fighter: DuelFighter) -> void:
 	var pos := fighter.global_position
 	pos.y = 0.09
-	_energy_wave(pos, 7.2, 0.48)
+	_energy_wave(pos, 7.2 * fighter.stats.range_multiplier * (1.3 if fighter.ghost_active else 1.0), 0.48)
 	var fragments := _burst(pos + Vector3.UP * 0.35, Vector3.UP, 42, Color("67d4ee"), 0.65, 2.0, 0.06)
 	var process := fragments.process_material as ParticleProcessMaterial
 	process.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_RING
@@ -308,11 +312,11 @@ func storm_hit(pos: Vector3, direction: Vector3, lethal := false) -> void:
 		tween.tween_property(ray, "scale", Vector3(0.02, 0.02, 1.45), 0.12)
 		tween.tween_callback(ray.queue_free)
 
-func meteor_warning(pos: Vector3, duration: float) -> MeshInstance3D:
-	# The fixed outside circle declares the 3.2 m damage radius; the inner one closes.
-	return _astral_ring(Vector3(pos.x, 0.095, pos.z), 6.4, maxf(0.05, duration), true, Color("f66a24"), Color("ffdd94"))
+func meteor_warning(pos: Vector3, duration: float, radius := 3.2) -> MeshInstance3D:
+	# The outside circle declares the damage radius; the inner one closes.
+	return _astral_ring(Vector3(pos.x, 0.095, pos.z), radius * 2.0, maxf(0.05, duration), true, Color("f66a24"), Color("ffdd94"))
 
-func meteor_impact(pos: Vector3) -> void:
+func meteor_impact(pos: Vector3, range_scale := 1.0) -> void:
 	var center := Vector3(pos.x, 0.18, pos.z)
 	sound("impact", center, -1.0, 0.52)
 	sound("crack", center, -8.0, 0.55)
@@ -333,8 +337,8 @@ func meteor_impact(pos: Vector3) -> void:
 	ember_process.radial_accel_min = 1.0
 	ember_process.radial_accel_max = 2.4
 	_burst(center, Vector3.UP, 14, Color("be9270"), 0.7, 3.4, 0.075)
-	ground_ring(Vector3(pos.x, 0.07, pos.z), Color("ffbe70"), 0.43, 7.0)
-	ground_ring(Vector3(pos.x, 0.075, pos.z), Color("f46b36"), 0.65, 8.0)
+	ground_ring(Vector3(pos.x, 0.07, pos.z), Color("ffbe70"), 0.43, 7.0 * range_scale)
+	ground_ring(Vector3(pos.x, 0.075, pos.z), Color("f46b36"), 0.65, 8.0 * range_scale)
 	_light_flash(center + Vector3.UP * 0.75, Color("ffb15e"), 4.5, 6.0, 0.26)
 
 func attach_trail(parent: Node3D, color: Color, amount: int = 18, lifetime: float = 0.26) -> GPUParticles3D:

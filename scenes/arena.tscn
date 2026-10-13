@@ -1,92 +1,46 @@
-[gd_scene load_steps=21 format=3]
+[gd_scene load_steps=11 format=3]
 
 [ext_resource type="Script" path="res://scripts/arena.gd" id="1"]
 [ext_resource type="Script" path="res://scripts/stage.gd" id="2"]
-[ext_resource type="Script" path="res://scripts/fighter.gd" id="3"]
-[ext_resource type="PackedScene" path="res://assets/characters/Knight.glb" id="4"]
-[ext_resource type="PackedScene" path="res://assets/characters/Skeleton_Warrior.glb" id="5"]
-[ext_resource type="Script" path="res://scripts/feedback.gd" id="6"]
-[ext_resource type="Script" path="res://scripts/hud.gd" id="7"]
+[ext_resource type="Script" path="res://scripts/feedback.gd" id="3"]
+[ext_resource type="Script" path="res://scripts/hud.gd" id="4"]
 
-[sub_resource type="ProceduralSkyMaterial" id="SwordReflectionMaterial"]
+[sub_resource type="ProceduralSkyMaterial" id="Reflection"]
 sky_top_color = Color(0.23, 0.31, 0.39, 1)
 sky_horizon_color = Color(0.82, 0.86, 0.91, 1)
 ground_bottom_color = Color(0.13, 0.14, 0.16, 1)
 ground_horizon_color = Color(0.64, 0.69, 0.76, 1)
 
-[sub_resource type="Sky" id="SwordReflectionSky"]
-sky_material = SubResource("SwordReflectionMaterial")
+[sub_resource type="Sky" id="Sky"]
+sky_material = SubResource("Reflection")
 
 [sub_resource type="Environment" id="Environment"]
 background_mode = 1
-background_color = Color(0.036, 0.065, 0.083, 1)
-sky = SubResource("SwordReflectionSky")
+background_color = Color(0.025, 0.045, 0.06, 1)
+sky = SubResource("Sky")
 ambient_light_source = 2
 ambient_light_color = Color(0.4, 0.60, 0.72, 1)
-ambient_light_energy = 0.40
+ambient_light_energy = 0.55
 reflected_light_source = 2
 tonemap_mode = 2
 tonemap_exposure = 1.0
 ssao_enabled = true
 ssao_radius = 1.0
-ssao_intensity = 1.8
+ssao_intensity = 1.3
 glow_enabled = true
-glow_intensity = 0.45
+glow_intensity = 0.35
 glow_bloom = 0.05
 glow_hdr_threshold = 1.2
-fog_enabled = true
-fog_light_color = Color(0.055, 0.115, 0.145, 1)
-fog_light_energy = 0.55
-fog_density = 0.004
-fog_height = -1.0
-fog_height_density = 0.5
 
-[sub_resource type="CylinderShape3D" id="FloorShape"]
+[sub_resource type="CylinderShape3D" id="Floor"]
 height = 0.4
-radius = 6.8
-
-[sub_resource type="CapsuleShape3D" id="ActorShape"]
-radius = 0.36
-height = 1.65
-
-[sub_resource type="BoxShape3D" id="SwordArea"]
-size = Vector3(1.9, 1.8, 2.15)
-
-[sub_resource type="CylinderShape3D" id="SpinArea"]
-height = 1.85
-radius = 2.8
-
-[sub_resource type="TorusMesh" id="PlayerRing"]
-inner_radius = 0.43
-outer_radius = 0.451
-rings = 48
-ring_segments = 5
-
-[sub_resource type="StandardMaterial3D" id="PlayerRingMaterial"]
-shading_mode = 0
-albedo_color = Color(0.24, 0.69, 0.73, 1)
-emission_enabled = true
-emission = Color(0.1, 0.5, 0.6, 1)
-emission_energy_multiplier = 0.6
-
-[sub_resource type="TorusMesh" id="EnemyRing"]
-inner_radius = 0.52
-outer_radius = 0.546
-rings = 48
-ring_segments = 5
-
-[sub_resource type="StandardMaterial3D" id="EnemyRingMaterial"]
-shading_mode = 0
-albedo_color = Color(0.76, 0.30, 0.15, 1)
-emission_enabled = true
-emission = Color(0.8, 0.23, 0.08, 1)
-emission_energy_multiplier = 0.6
+radius = 16.3
 
 [sub_resource type="PlaneMesh" id="Underlay"]
 size = Vector2(200, 200)
 
 [sub_resource type="StandardMaterial3D" id="UnderlayMaterial"]
-albedo_color = Color(0.075, 0.115, 0.135, 1)
+albedo_color = Color(0.035, 0.06, 0.075, 1)
 roughness = 1.0
 
 [node name="EmberYard" type="Node3D"]
@@ -96,27 +50,29 @@ script = ExtResource("1")
 environment = SubResource("Environment")
 
 [node name="KeyLight" type="DirectionalLight3D" parent="."]
-rotation_degrees = Vector3(-47, -32, 0)
+rotation_degrees = Vector3(-57, -32, 0)
 light_color = Color(1, 0.86, 0.66, 1)
 light_energy = 1.15
 shadow_enabled = true
-directional_shadow_max_distance = 42.0
+directional_shadow_max_distance = 65.0
 shadow_blur = 1.2
 
 [node name="RimLight" type="DirectionalLight3D" parent="."]
-rotation_degrees = Vector3(-22, 142, 0)
+rotation_degrees = Vector3(-30, 142, 0)
 light_color = Color(0.38, 0.65, 0.85, 1)
-light_energy = 0.95
+light_energy = 0.75
 
 [node name="Camera3D" type="Camera3D" parent="."]
-position = Vector3(8.9, 12.2, 15.9)
+position = Vector3(10, 24, 10)
+projection = 1
+size = 15.0
 current = true
-fov = 34.0
 near = 0.1
 far = 150.0
 
 [node name="Stage" type="Node3D" parent="."]
 script = ExtResource("2")
+radius = 15.8
 
 [node name="Floor" type="StaticBody3D" parent="Stage"]
 position = Vector3(0, -0.2, 0)
@@ -124,84 +80,19 @@ collision_layer = 1
 collision_mask = 6
 
 [node name="CollisionShape3D" type="CollisionShape3D" parent="Stage/Floor"]
-shape = SubResource("FloorShape")
+shape = SubResource("Floor")
 
 [node name="MistFloor" type="MeshInstance3D" parent="Stage"]
 position = Vector3(0, -1.5, 0)
 mesh = SubResource("Underlay")
 material_override = SubResource("UnderlayMaterial")
 
-[node name="Player" type="CharacterBody3D" parent="."]
-position = Vector3(-1.35, 0.04, 0.8)
-collision_layer = 2
-collision_mask = 5
-floor_snap_length = 0.2
-script = ExtResource("3")
-player_controlled = true
+[node name="Enemies" type="Node3D" parent="."]
 
-[node name="CollisionShape3D" type="CollisionShape3D" parent="Player"]
-position = Vector3(0, 0.83, 0)
-shape = SubResource("ActorShape")
-
-[node name="Visual" type="Node3D" parent="Player"]
-scale = Vector3(1.3, 1.3, 1.3)
-
-[node name="Model" parent="Player/Visual" instance=ExtResource("4")]
-
-[node name="Hitbox" type="Area3D" parent="Player"]
-collision_layer = 0
-collision_mask = 4
-monitorable = false
-
-[node name="CollisionShape3D" type="CollisionShape3D" parent="Player/Hitbox"]
-position = Vector3(0, 1.0, 1.25)
-shape = SubResource("SwordArea")
-
-[node name="Footing" type="MeshInstance3D" parent="Player"]
-position = Vector3(0, 0.03, 0)
-mesh = SubResource("PlayerRing")
-material_override = SubResource("PlayerRingMaterial")
-cast_shadow = 0
-
-[node name="SkillHitbox" type="Area3D" parent="Player"]
-collision_layer = 0
-collision_mask = 4
-monitorable = false
-
-[node name="CollisionShape3D" type="CollisionShape3D" parent="Player/SkillHitbox"]
-position = Vector3(0, 1, 0)
-shape = SubResource("SpinArea")
-
-[node name="Enemy" type="CharacterBody3D" parent="."]
-position = Vector3(1.15, 0.04, -0.6)
-collision_layer = 4
-collision_mask = 3
-floor_snap_length = 0.2
-script = ExtResource("3")
-
-[node name="CollisionShape3D" type="CollisionShape3D" parent="Enemy"]
-position = Vector3(0, 0.83, 0)
-shape = SubResource("ActorShape")
-
-[node name="Visual" type="Node3D" parent="Enemy"]
-scale = Vector3(1.4, 1.4, 1.4)
-
-[node name="Model" parent="Enemy/Visual" instance=ExtResource("5")]
-
-[node name="Hitbox" type="Area3D" parent="Enemy"]
-collision_layer = 0
-collision_mask = 0
-monitoring = false
-monitorable = false
-
-[node name="Footing" type="MeshInstance3D" parent="Enemy"]
-position = Vector3(0, 0.03, 0)
-mesh = SubResource("EnemyRing")
-material_override = SubResource("EnemyRingMaterial")
-cast_shadow = 0
+[node name="Drops" type="Node3D" parent="."]
 
 [node name="Feedback" type="Node3D" parent="."]
-script = ExtResource("6")
+script = ExtResource("3")
 
 [node name="HUD" type="CanvasLayer" parent="."]
 layer = 5
@@ -214,4 +105,4 @@ anchor_bottom = 1.0
 grow_horizontal = 2
 grow_vertical = 2
 mouse_filter = 2
-script = ExtResource("7")
+script = ExtResource("4")

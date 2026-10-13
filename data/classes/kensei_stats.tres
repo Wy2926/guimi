@@ -1,0 +1,25 @@
+[gd_resource type="Resource" script_class="BattleStats" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/battle_stats.gd" id="1"]
+
+[resource]
+resource_name = "剑豪 · 基础属性"
+script = ExtResource("1")
+max_health = 120.0
+physical_attack = 25.0
+magic_attack = 25.0
+independent_attack = 25.0
+physical_defense = 5.0
+magic_defense = 5.0
+crit_chance = 0.08
+crit_multiplier = 1.5
+dodge_chance = 0.0
+move_speed = 5.4
+attack_speed = 1.0
+cooldown_multiplier = 1.0
+range_multiplier = 1.0
+pickup_radius = 2.0
+life_steal = 0.0
+element = 0
+element_bonus = Array[float]([0.0, 0.0, 0.0, 0.0])
+resistances = Array[float]([0.0, 0.0, 0.0, 0.0])

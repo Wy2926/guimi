@@ -1,0 +1,15 @@
+[gd_resource type="Resource" script_class="SkillDefinition" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/skill_definition.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = "meteor"
+title = "流星"
+description = "近战出招触发火属性流星；读取魔法攻击力，不由辅助命中递归触发。"
+category = "passive"
+kind = 1
+coefficient = 1.28
+coefficient_growth = 0.2
+element = 1
+max_level = 5

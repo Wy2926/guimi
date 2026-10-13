@@ -1,0 +1,15 @@
+[gd_resource type="Resource" script_class="SkillDefinition" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/skill_definition.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = "swords"
+title = "万剑归宗"
+description = "八柄飞剑自动追击并归位；读取独立攻击力，绕过双防，仍受元素与暴击影响。"
+category = "passive"
+kind = 2
+coefficient = 0.2
+coefficient_growth = 0.2
+element = -1
+max_level = 5

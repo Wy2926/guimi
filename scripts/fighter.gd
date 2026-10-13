@@ -5,29 +5,19 @@ extends CharacterBody3D
 signal swing_started(heavy: bool)
 signal swing_active(heavy: bool)
 signal skill_released
-signal hit_confirmed(target: DuelFighter, point: Vector3, lethal: bool, damage: int, heavy: bool)
+signal hit_confirmed(target: Node3D, point: Vector3, result: Dictionary, heavy: bool, source: String)
 signal defeated
 signal ghost_changed(enabled: bool)
+signal hurt(result: Dictionary)
+signal stepped(point: Vector3)
 
 const ATTACK := &"1H_Melee_Attack_Slice_Horizontal"
 const SKILL := &"2H_Melee_Attack_Spin"
-const DAMAGE := 25
-const SKILL_DAMAGE := 55
-const SKILL_COOLDOWN := 3.0
 const SKILL_DURATION := 1.04
 const SKILL_SWING := 0.34
 const SKILL_RELEASE := 0.44
 const SKILL_ACTIVE_END := 0.52
-const MAX_HEALTH := 100
-const MOVE_SPEED := 4.4
-const BUFFER_TIME := 0.15
-const ATTACK_DURATION := 0.60
-const SWING_START := 0.17
-const ACTIVE_START := 0.20
-const ACTIVE_END := 0.27
 const COMBO_GRACE := 0.65
-const GHOST_DAMAGE := 1.5
-const GHOST_SPEED := 1.25
 
 # Only this fighter's authored moves, not a general skill/animation framework.
 # Knots align the original artist's anticipation and swing with the hit events.
@@ -44,16 +34,19 @@ const GHOST_COMBO := [
 	{"animation": &"Ghost_Execution", "source": &"2H_Melee_Attack_Chop", "label": "厉鬼断狱", "duration": 0.70, "knots": [Vector2(0, 0), Vector2(0.70, 0.20), Vector2(0.90, 0.34)], "strikes": [0.27], "damage": 38, "style": "down", "round": false, "lunge": 6.2},
 ]
 
-@export var player_controlled := false
-@export var home_position := Vector3(1.15, 0.04, -0.6)
+var progression: RunProgression
+var feedback: Node3D
+var arena_radius := 15.8
+var enabled := false
+var auto_attack := true
 @onready var visual: Node3D = $Visual
 @onready var animation: AnimationPlayer = $Visual/Model/AnimationPlayer
 @onready var hitbox: Area3D = $Hitbox
 @onready var skill_hitbox := get_node_or_null("SkillHitbox") as Area3D
-@onready var arena: Node3D = get_parent()
-
-var opponent: DuelFighter
-var health := MAX_HEALTH
+var stats: BattleStats:
+	get: return progression.stats
+var opponent: Node3D
+var health := 120.0
 var attacking := false
 var active := false
 var did_hit := false
@@ -62,6 +55,11 @@ var recovering := false
 var using_skill := false
 var ghost_active := false
 var ghost_requested := false
+var ghost_left := 0.0
+var ghost_cooldown := 0.0
+var hurt_protection := 0.0
+var _target_refresh := 0.0
+var _heal_budget := 0.0
 var ghost_aura: Node3D
 var combo_index := 0
 var combo_left := 0.0
@@ -76,20 +74,16 @@ var strike_total: int:
 var move_duration: float:
 	get: return SKILL_DURATION if using_skill else current_move.duration
 var attack_speed: float:
-	get: return GHOST_SPEED if ghost_active else 1.0
+	get: return stats.attack_speed * (progression.skill("ghost").attack_speed_multiplier if ghost_active else 1.0)
 var damage_multiplier: float:
-	get: return GHOST_DAMAGE if ghost_active else 1.0
+	get: return progression.skill("ghost").damage_multiplier if ghost_active else 1.0
 var combo_finisher: bool:
 	get: return not using_skill and combo_index == combo_total - 1
 var _combo_next := 0
 var _hit_ids: Array[int] = []
 var skill_cooldown := 0.0
-var buffered := 0.0
 var buffered_skill := false
-var stagger := 0.0
 var freeze_left := 0.0
-var respawn_left := 0.0
-var return_delay := 0.0
 var attack_count := 0
 var facing := Vector3.FORWARD
 var attack_direction := Vector3.FORWARD
@@ -101,21 +95,19 @@ var step_distance := 0.0
 var _last_position := Vector3.ZERO
 
 func _ready() -> void:
-	# Other fighters are not moving platforms, including immediately after respawn.
+	# Other fighters are not moving platforms.
 	platform_floor_layers = 1
-	if player_controlled:
-		_dress_player()
-	else:
-		add_to_group("enemies")
+	_dress_player()
+	add_to_group("player")
 	flash_material = ShaderMaterial.new()
 	flash_material.shader = preload("res://shaders/hit_flash.gdshader")
 	for node in visual.find_children("*", "MeshInstance3D", true, false):
 		var mesh := node as MeshInstance3D
 		meshes.append(mesh)
 		mesh.material_overlay = flash_material
-		if player_controlled and ("Shield" in mesh.name or mesh.name == "1H_Sword" or mesh.name == "1H_Sword_Offhand"):
+		if "Shield" in mesh.name or mesh.name == "1H_Sword" or mesh.name == "1H_Sword_Offhand":
 			mesh.hide()
-		if player_controlled and mesh.name == "2H_Sword":
+		if mesh.name == "2H_Sword":
 			sword = mesh
 			mesh.show()
 			# Keep the broader blade inside the existing melee reach and grounded at rest.
@@ -151,10 +143,9 @@ func _setup_animations() -> void:
 		var source := animation.get_animation(clip).duplicate(true) as Animation
 		source.loop_mode = Animation.LOOP_LINEAR if clip in ["Idle", "Running_A", "Walking_A"] else Animation.LOOP_NONE
 		library.add_animation(clip, source)
-	if player_controlled:
-		for move in NORMAL_COMBO + GHOST_COMBO:
-			_add_move_animation(library, move)
-		_add_move_animation(library, {"animation": SKILL, "source": SKILL, "duration": SKILL_DURATION, "knots": [Vector2(0, 0), Vector2(0.8, SKILL_SWING), Vector2(1.6, 0.66)], "strikes": [SKILL_RELEASE]}, true)
+	for move in NORMAL_COMBO + GHOST_COMBO:
+		_add_move_animation(library, move)
+	_add_move_animation(library, {"animation": SKILL, "source": SKILL, "duration": SKILL_DURATION, "knots": [Vector2(0, 0), Vector2(0.8, SKILL_SWING), Vector2(1.6, 0.66)], "strikes": [SKILL_RELEASE]}, true)
 	for key in animation.get_animation_library_list():
 		animation.remove_animation_library(key)
 	animation.add_animation_library("", library)
@@ -190,9 +181,9 @@ func _add_move_animation(library: AnimationLibrary, move: Dictionary, heavy := f
 
 func reset_fighter() -> void:
 	_clear_ghost()
-	collision_layer = 2 if player_controlled else 4
-	collision_mask = 5 if player_controlled else 7
-	health = MAX_HEALTH
+	collision_layer = 2
+	collision_mask = 1
+	health = stats.max_health
 	dead = false
 	attacking = false
 	active = false
@@ -206,16 +197,17 @@ func reset_fighter() -> void:
 	strike_index = -1
 	_hit_ids.clear()
 	skill_cooldown = 0.0
-	buffered = 0.0
+	ghost_cooldown = 0.0
+	ghost_left = 0.0
+	hurt_protection = 0.0
+	_heal_budget = 0.0
+	opponent = null
 	buffered_skill = false
 	attack_count = 0
-	stagger = 0.0
 	freeze_left = 0.0
-	respawn_left = 0.0
-	return_delay = 0.6
 	velocity = Vector3.ZERO
-	position = Vector3(-1.35, 0.04, 0.8) if player_controlled else home_position
-	facing = Vector3(1, 0, -0.56).normalized() if player_controlled else Vector3(-1, 0, 0.56).normalized()
+	position = Vector3(0, 0.04, 0)
+	facing = Vector3(1, 0, -0.56).normalized()
 	visual.rotation = Vector3(0, atan2(facing.x, facing.z), 0)
 	hitbox.rotation.y = visual.rotation.y
 	animation.speed_scale = 1.0
@@ -227,15 +219,14 @@ func reset_fighter() -> void:
 		mesh.transparency = 0.0
 	_last_position = position
 	reset_physics_interpolation()
-	if player_controlled:
-		hitbox.scale = Vector3.ONE
-		skill_hitbox.scale = Vector3.ONE
+	_refresh_range()
 
 func request_ghost() -> void:
-	if not player_controlled or dead or not arena.ready_to_play:
+	if dead or not enabled or ghost_active or ghost_requested or ghost_cooldown > 0.0 or progression.skill_level("ghost") == 0:
 		return
-	ghost_requested = not ghost_requested
-	if not attacking and stagger <= 0.0:
+	ghost_cooldown = progression.skill("ghost").cooldown * stats.cooldown_multiplier
+	ghost_requested = true
+	if not attacking:
 		_apply_ghost()
 
 func _apply_ghost() -> void:
@@ -251,16 +242,17 @@ func _apply_ghost() -> void:
 		ghost_aura.queue_free()
 	ghost_aura = null
 	if ghost_active:
-		ghost_aura = arena.feedback.create_ghost_aura(self)
+		ghost_left = progression.skill("ghost").duration_at(progression.skill_level("ghost"))
+		ghost_aura = feedback.create_ghost_aura(self)
 	flash_material.set_shader_parameter("ghost_strength", 0.6 if ghost_active else 0.0)
 	sword_glow.set_shader_parameter("ghost_strength", 0.8 if ghost_active else 0.0)
-	hitbox.scale = Vector3(1.3, 1.0, 1.3) if ghost_active else Vector3.ONE
-	skill_hitbox.scale = Vector3(1.3, 1.0, 1.3) if ghost_active else Vector3.ONE
+	_refresh_range()
 	ghost_changed.emit(ghost_active)
 
 func _clear_ghost() -> void:
 	ghost_active = false
 	ghost_requested = false
+	ghost_left = 0.0
 	if is_instance_valid(ghost_aura):
 		ghost_aura.queue_free()
 	ghost_aura = null
@@ -277,30 +269,20 @@ func get_attack_phase() -> String:
 	var last: float = SKILL_ACTIVE_END if using_skill else current_move.strikes.back() + 0.07
 	return "蓄势" if time < first else ("挥斩" if time < last else "收势")
 
-func request_attack() -> void:
-	_request_move(false)
-
 func request_skill() -> void:
-	_request_move(true)
-
-func _request_move(heavy: bool) -> void:
-	if not player_controlled or dead or stagger > 0.0 or not arena.ready_to_play:
-		return
-	if heavy and skill_cooldown > 0.0:
+	if dead or not enabled or skill_cooldown > 0.0:
 		return
 	if attacking:
-		# One-slot late buffer. Early spam is discarded, never an unbounded combo queue.
-		if animation.current_animation_position >= move_duration - BUFFER_TIME * attack_speed:
-			buffered = BUFFER_TIME + 0.04
-			buffered_skill = heavy
+		# Manual skill has priority over the next automatic swing; at most one request.
+		buffered_skill = true
 		return
-	_begin_attack(heavy)
+	_begin_attack(true)
 
 func _begin_attack(heavy := false) -> void:
 	attacking = true
 	using_skill = heavy
 	if heavy:
-		skill_cooldown = SKILL_COOLDOWN
+		skill_cooldown = progression.skill("ring").cooldown * stats.cooldown_multiplier
 		_combo_next = 0
 		combo_left = 0.0
 	else:
@@ -314,25 +296,18 @@ func _begin_attack(heavy := false) -> void:
 	did_hit = false
 	strike_index = -1
 	_hit_ids.clear()
-	buffered = 0.0
+	buffered_skill = false
 	attack_count += 1
-	# Generous but local facing assist. No long-distance magnet or teleport.
-	var nearest := 3.3
-	for candidate in get_tree().get_nodes_in_group("enemies"):
-		if candidate.dead or not candidate.is_visible_in_tree():
-			continue
-		var distance := global_position.distance_to(candidate.global_position)
-		if distance < nearest:
-			nearest = distance
-			opponent = candidate
+	_acquire_target()
 	if is_instance_valid(opponent) and not opponent.dead and opponent.is_visible_in_tree():
 		var to_target := opponent.global_position - global_position
 		to_target.y = 0
-		if to_target.length() < 3.3:
+		if to_target.length() < _attack_reach() + 0.5:
 			facing = to_target.normalized()
 	attack_direction = facing
 	visual.rotation.y = atan2(facing.x, facing.z)
 	hitbox.rotation.y = visual.rotation.y
+	_refresh_range()
 	animation.speed_scale = attack_speed
 	animation.play(SKILL if heavy else current_move.animation, 0.045, 1.0)
 	swing_started.emit(heavy)
@@ -365,101 +340,104 @@ func _try_hit() -> void:
 	var round_attack: bool = using_skill or current_move.round
 	var area := skill_hitbox if round_attack else hitbox
 	for body in area.get_overlapping_bodies():
-		if body is DuelFighter and body != self and not body.dead and body.is_visible_in_tree() and body.get_instance_id() not in _hit_ids:
+		if body.is_in_group("enemies") and not body.dead and body.get_instance_id() not in _hit_ids:
 			var toward: Vector3 = body.global_position - global_position
 			toward.y = 0
 			if not round_attack and toward.normalized().dot(attack_direction) < 0.2:
 				continue
 			_hit_ids.append(body.get_instance_id())
+			var first_contact := not did_hit
 			did_hit = true
-			var direction := toward.normalized() if round_attack else attack_direction
-			var damage := roundi((SKILL_DAMAGE if using_skill else int(current_move.damage)) * damage_multiplier)
+			var id := "ring" if using_skill else "slash"
+			var coefficient := progression.coefficient(id) * damage_multiplier
+			if not using_skill:
+				coefficient *= float(current_move.damage) / 25.0
 			var linking := not using_skill and strike_index < strike_total - 1
 			var heavy_hit := using_skill or combo_finisher
-			var lethal: bool = body.receive_hit(damage, direction, heavy_hit, linking)
-			if ghost_active:
-				body.flash_material.set_shader_parameter("tint", Color("ff608f"))
-				body.flash_material.set_shader_parameter("flash", 0.36 if lethal else 0.28)
-			elif combo_finisher:
-				body.flash_material.set_shader_parameter("tint", Color("ffc05c"))
-			var stop := (0.105 if lethal else 0.085) if heavy_hit else (0.080 if lethal else 0.058)
-			if ghost_active and not heavy_hit:
-				stop = 0.035 if lethal else 0.024
-			freeze_left = maxf(freeze_left, stop)
-			animation.speed_scale = 0.0
-			var point: Vector3 = body.global_position - direction * 0.48 + Vector3.UP * 1.13
-			hit_confirmed.emit(body, point, lethal, damage, using_skill)
+			var definition := progression.skill(id)
+			var result := deal_damage(body, definition.kind, coefficient, definition.element, heavy_hit, linking, "裂环斩" if using_skill else ("厉鬼" if ghost_active else "连斩"))
+			# One short animation accent per window. Movement never freezes with it.
+			if first_contact and result.get("actual", 0) > 0:
+				freeze_left = 0.035 if heavy_hit else 0.018
+				animation.speed_scale = 0.0
 
-func receive_hit(damage: int, direction: Vector3, heavy := false, spectral := false) -> bool:
-	if dead:
-		return false
-	health = maxi(health - damage, 0)
-	dead = health == 0
-	if player_controlled:
+func deal_damage(target: Node3D, kind: int, coefficient: float, element := -1, heavy := false, spectral := false, source := "") -> Dictionary:
+	if dead or not enabled or not is_instance_valid(target) or target.dead:
+		return {"actual": 0, "lethal": false}
+	var result := DamageRules.calculate(stats, target.stats, kind, coefficient, element)
+	var direction := (target.global_position - global_position).normalized()
+	direction.y = 0.0
+	result = target.receive_damage(result, direction, heavy, spectral)
+	var actual := float(result.get("actual", 0.0))
+	if actual > 0:
+		var healing := minf(actual * stats.life_steal, _heal_budget)
+		health = minf(stats.max_health, health + healing)
+		_heal_budget -= healing
+		hit_confirmed.emit(target, target.global_position + Vector3.UP * 1.1, result, heavy, source)
+	return result
+
+func receive_damage(incoming: Dictionary, _direction: Vector3, _heavy := false, _spectral := false) -> Dictionary:
+	var result := incoming.duplicate()
+	result["actual"] = 0
+	result["lethal"] = false
+	if dead or not enabled or hurt_protection > 0.0:
+		result["immune"] = true
+		return result
+	if result.get("dodged", false):
+		hurt.emit(result)
+		return result
+	var actual := minf(health, float(result.get("damage", 0)))
+	if actual <= 0:
+		return result
+	health -= actual
+	result["actual"] = actual
+	result["lethal"] = health <= 0
+	hurt_protection = 0.65
+	flash_material.set_shader_parameter("tint", Color("ff736d"))
+	flash_material.set_shader_parameter("flash", 0.6)
+	hurt.emit(result)
+	if health <= 0:
+		dead = true
 		attacking = false
 		active = false
-		using_skill = false
-		buffered = 0.0
-		combo_left = 0.0
-		_combo_next = 0
-	var hit_freeze := (0.105 if dead else 0.085) if heavy else (0.080 if dead else 0.058)
-	freeze_left = maxf(freeze_left, 0.016 if spectral and not dead else hit_freeze)
-	stagger = maxf(stagger, 0.10 if spectral else (0.60 if heavy else 0.36))
-	return_delay = 1.0 if heavy else 0.75
-	velocity = direction * (1.2 if spectral and not dead else ((8.5 if dead else 7.2) if heavy else (6.3 if dead else 4.0)))
-	animation.play("Death_B" if dead else ("Hit_A" if health % 50 == 0 else "Hit_B"), 0.035)
-	animation.advance(0.035)
-	animation.speed_scale = 0.0
-	flash_material.set_shader_parameter("tint", Color("8bebff") if heavy or spectral else Color("ffc05c"))
-	flash_material.set_shader_parameter("flash", 0.32 if spectral and not dead else 0.62)
-	if dead:
 		_clear_ghost()
-		collision_layer = 0
-		collision_mask = 1
-		respawn_left = 3.1
+		set_deferred("collision_layer", 0)
+		animation.speed_scale = 1.0
+		animation.play("Death_B", 0.06)
 		defeated.emit()
-	return dead
+	return result
 
 func _physics_process(delta: float) -> void:
+	if not enabled or dead:
+		return
 	skill_cooldown = maxf(0.0, skill_cooldown - delta)
-	if player_controlled:
-		var time := animation.current_animation_position
-		var glow := clampf(time / SKILL_SWING, 0.0, 1.0) * (1.0 - smoothstep(0.66, 0.86, time)) if using_skill else 0.0
-		sword_glow.set_shader_parameter("tint", Color("ff426f") if ghost_active else Color("62ddff"))
-		sword_glow.set_shader_parameter("flash", glow * 0.78)
+	ghost_cooldown = maxf(0.0, ghost_cooldown - delta)
+	hurt_protection = maxf(0.0, hurt_protection - delta)
+	_heal_budget = minf(stats.max_health * 0.12, _heal_budget + stats.max_health * 0.12 * delta)
+	if ghost_active:
+		ghost_left = maxf(0.0, ghost_left - delta)
+		if ghost_left == 0:
+			ghost_requested = false
+	var time := animation.current_animation_position
+	var glow := clampf(time / SKILL_SWING, 0.0, 1.0) * (1.0 - smoothstep(0.66, 0.86, time)) if using_skill else 0.0
+	sword_glow.set_shader_parameter("tint", Color("ff426f") if ghost_active else Color("62ddff"))
+	sword_glow.set_shader_parameter("flash", glow * 0.78)
 	if freeze_left > 0.0:
 		freeze_left = maxf(0.0, freeze_left - delta)
 		if freeze_left == 0.0:
 			animation.speed_scale = attack_speed if attacking else 1.0
-		return
 	var flash: float = flash_material.get_shader_parameter("flash")
 	flash_material.set_shader_parameter("flash", move_toward(flash, 0.0, delta * 12.0))
-	buffered = maxf(0.0, buffered - delta)
-	stagger = maxf(0.0, stagger - delta)
-	return_delay = maxf(0.0, return_delay - delta)
 	if not attacking:
 		combo_left = maxf(0.0, combo_left - delta)
-	if dead:
-		respawn_left -= delta
-		velocity.x = move_toward(velocity.x, 0.0, delta * 13.0)
-		velocity.z = move_toward(velocity.z, 0.0, delta * 13.0)
-		if respawn_left < 0.7:
-			for mesh in meshes:
-				mesh.transparency = 1.0 - clampf(respawn_left / 0.7, 0.0, 1.0)
-		if respawn_left <= 0:
-			reset_fighter()
-			arena.target_respawned(self)
-	elif stagger > 0:
-		velocity.x = move_toward(velocity.x, 0.0, delta * 9.5)
-		velocity.z = move_toward(velocity.z, 0.0, delta * 9.5)
-	elif player_controlled:
-		if not attacking and ghost_requested != ghost_active:
-			_apply_ghost()
-		if not attacking and Input.is_action_pressed("attack") and arena.ready_to_play:
-			request_attack()
-		_player_motion(delta)
-	else:
-		_target_motion(delta)
+		_apply_ghost()
+	_target_refresh -= delta
+	if _target_refresh <= 0.0:
+		_target_refresh = 0.10
+		_acquire_target()
+	if not attacking and auto_attack and is_instance_valid(opponent) and not opponent.dead and global_position.distance_to(opponent.global_position) <= _attack_reach():
+		_begin_attack()
+	_player_motion(delta)
 	if not is_on_floor():
 		velocity.y -= 18.0 * delta
 	else:
@@ -469,15 +447,14 @@ func _physics_process(delta: float) -> void:
 		_try_hit()
 	# Physical ring colliders are the primary boundary. This catches reset/teleport edge cases.
 	var flat := Vector2(position.x, position.z)
-	if flat.length() > 5.65:
-		flat = flat.normalized() * 5.65
+	if flat.length() > arena_radius - 0.5:
+		flat = flat.normalized() * (arena_radius - 0.5)
 		position.x = flat.x
 		position.z = flat.y
-	if player_controlled:
-		step_distance += (position - _last_position).length()
-		if step_distance > 1.0 and not attacking:
-			step_distance = 0.0
-			arena.footstep(global_position)
+	step_distance += (position - _last_position).length()
+	if step_distance > 1.3:
+		step_distance = 0.0
+		stepped.emit(global_position)
 	_last_position = position
 
 func _player_motion(delta: float) -> void:
@@ -488,16 +465,7 @@ func _player_motion(delta: float) -> void:
 	forward.y = 0
 	forward = forward.normalized()
 	var direction := right * input.x + forward * input.y
-	if attacking and not recovering:
-		var time := animation.current_animation_position
-		var window := false
-		for contact in ([SKILL_RELEASE] if using_skill else current_move.strikes):
-			window = window or (time >= float(contact) - 0.08 and time < float(contact) + 0.07)
-		var impulse: float = (1.6 if using_skill else float(current_move.lunge)) * (1.15 if ghost_active else 1.0) if window and not did_hit else 0.0
-		velocity.x = attack_direction.x * impulse
-		velocity.z = attack_direction.z * impulse
-		return
-	var speed := MOVE_SPEED * (0.45 if attacking else 1.0)
+	var speed := stats.move_speed * (0.65 if using_skill and not recovering else 1.0)
 	velocity.x = move_toward(velocity.x, direction.x * speed, 32.0 * delta)
 	velocity.z = move_toward(velocity.z, direction.z * speed, 32.0 * delta)
 	if direction.length() > 0.1:
@@ -507,16 +475,27 @@ func _player_motion(delta: float) -> void:
 	if not attacking:
 		_play_locomotion(direction.length() > 0.1, "Running_A", 1.25)
 
-func _target_motion(delta: float) -> void:
-	var toward := opponent.position - position
-	toward.y = 0
-	var direction := toward.normalized()
-	var approach := toward.length() > 2.05 and return_delay <= 0.0
-	var desired := direction * 1.4 if approach else Vector3.ZERO
-	velocity.x = move_toward(velocity.x, desired.x, 6.0 * delta)
-	velocity.z = move_toward(velocity.z, desired.z, 6.0 * delta)
-	visual.rotation.y = lerp_angle(visual.rotation.y, atan2(direction.x, direction.z), minf(1.0, delta * 6.0))
-	_play_locomotion(approach, "Walking_A", 1.0)
+func _attack_reach() -> float:
+	return 2.25 * stats.range_multiplier * (1.3 if ghost_active else 1.0)
+
+func _acquire_target() -> void:
+	var reach := _attack_reach()
+	if is_instance_valid(opponent) and not opponent.dead and global_position.distance_to(opponent.global_position) <= reach:
+		return
+	opponent = null
+	var nearest := reach + 0.35
+	for candidate in get_tree().get_nodes_in_group("enemies"):
+		if candidate.dead:
+			continue
+		var distance := global_position.distance_to(candidate.global_position)
+		if distance < nearest:
+			nearest = distance
+			opponent = candidate
+
+func _refresh_range() -> void:
+	var reach := stats.range_multiplier * (1.3 if ghost_active else 1.0)
+	hitbox.scale = Vector3(reach, 1, reach)
+	skill_hitbox.scale = Vector3(reach, 1, reach)
 
 func _play_locomotion(moving: bool, walk: String, speed: float) -> void:
 	var clip := walk if moving else "Idle"
@@ -533,9 +512,8 @@ func _on_animation_finished(clip: StringName) -> void:
 		using_skill = false
 		animation.speed_scale = 1.0
 		_apply_ghost()
-		if buffered > 0:
-			_begin_attack(buffered_skill)
-		elif Input.is_action_pressed("attack") and arena.ready_to_play:
-			_begin_attack(false)
+		if enabled and not dead and buffered_skill and skill_cooldown <= 0:
+			buffered_skill = false
+			_begin_attack(true)
 		else:
 			animation.play("Idle", 0.1)
