@@ -1,0 +1,38 @@
+{
+  "name": "苍穹 · 裂星 / Astral Edge 01",
+  "status": "standalone_visual_prototype_not_integrated_into_combat",
+  "concept": "../concept/astral_edge-v1.png",
+  "concept_prompt": "../concept/prompt.txt",
+  "concept_method": "built-in image_gen tool",
+  "model_source": "astral_edge.blend",
+  "model_export": "../astral_edge.glb",
+  "model_builder": "res://tools/build_astral_edge.py",
+  "model_method": "original authored contour meshes, beveled metal, crystalline facets and modeled rune inlays; executed through Blender MCP",
+  "blender_version": "5.2.2 LTS",
+  "godot_version": "4.7.2 Forward+",
+  "runtime_scene": "res://assets/weapons/astral_edge/astral_edge.tscn",
+  "impact_scene": "res://assets/weapons/astral_edge/impact.tscn",
+  "showcase": "res://scenes/astral_edge_showcase.tscn",
+  "interface": {
+    "axis": "tip +Y, front +Z, pommel origin",
+    "length": 3.55,
+    "set_motion": ["IDLE=0", "CHARGE=1", "FLIGHT=2", "RETURN=3"],
+    "ownership": "caller owns root transform, target, collision and damage; asset owns local decorative movement, materials and trail",
+    "impact": "instantiate the standalone impact scene at the contact point; it frees itself after 0.65 seconds"
+  },
+  "showcase_controls": {
+    "Space": "pause/resume",
+    "1": "idle",
+    "2": "charge",
+    "3": "flight",
+    "A": "automatic cycle",
+    "Esc": "close"
+  },
+  "validation": {
+    "command": "Godot --path . res://scenes/astral_edge_showcase.tscn --fixed-fps 60 --quit-after 500 -- --capture",
+    "gpu": "NVIDIA GeForce RTX 4060 Laptop GPU",
+    "capture_report": "res://artifacts/astral-edge/report.json",
+    "video": "res://artifacts/astral-edge/astral-edge-preview.mp4",
+    "scope": "four-instance isolated rendered preview only; not an arena performance benchmark or completed combat integration"
+  }
+}

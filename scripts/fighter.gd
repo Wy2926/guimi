@@ -361,13 +361,14 @@ func _try_hit() -> void:
 				freeze_left = 0.035 if heavy_hit else 0.018
 				animation.speed_scale = 0.0
 
-func deal_damage(target: Node3D, kind: int, coefficient: float, element := -1, heavy := false, spectral := false, source := "") -> Dictionary:
+func deal_damage(target: Node3D, kind: int, coefficient: float, element := -1, heavy := false, spectral := false, source := "", hit_direction := Vector3.ZERO, apply_control := true) -> Dictionary:
 	if dead or not enabled or not is_instance_valid(target) or target.dead:
 		return {"actual": 0, "lethal": false}
 	var result := DamageRules.calculate(stats, target.stats, kind, coefficient, element)
-	var direction := (target.global_position - global_position).normalized()
+	var direction: Vector3 = hit_direction if hit_direction.length_squared() > 0.0001 else target.global_position - global_position
 	direction.y = 0.0
-	result = target.receive_damage(result, direction, heavy, spectral)
+	direction = direction.normalized()
+	result = target.receive_damage(result, direction, heavy, spectral, apply_control)
 	var actual := float(result.get("actual", 0.0))
 	if actual > 0:
 		var healing := minf(actual * stats.life_steal, _heal_budget)
@@ -376,7 +377,7 @@ func deal_damage(target: Node3D, kind: int, coefficient: float, element := -1, h
 		hit_confirmed.emit(target, target.global_position + Vector3.UP * 1.1, result, heavy, source)
 	return result
 
-func receive_damage(incoming: Dictionary, _direction: Vector3, _heavy := false, _spectral := false) -> Dictionary:
+func receive_damage(incoming: Dictionary, _direction: Vector3, _heavy := false, _spectral := false, _apply_control := true) -> Dictionary:
 	var result := incoming.duplicate()
 	result["actual"] = 0
 	result["lethal"] = false

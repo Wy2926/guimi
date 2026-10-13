@@ -140,6 +140,8 @@ func _refresh() -> void:
 	_update_skill("ghost", float(player.ghost_cooldown), bool(player.ghost_active), float(player.ghost_left))
 	_update_skill("swords", 0.0, false, 0.0)
 	_update_skill("meteor", 0.0, false, 0.0)
+	var orb_cooldown: float = float(arena.orbs.cooldown_left) if is_instance_valid(arena.orbs) else 0.0
+	_update_skill("thunder_orb", orb_cooldown, false, 0.0)
 	var boss = arena.boss
 	_boss_panel.visible = is_instance_valid(boss) and not boss.dead
 	if _boss_panel.visible:
@@ -166,10 +168,18 @@ func _update_skill(id: String, cooldown: float, active: bool, remaining: float) 
 		status.text = "升级时可领悟"
 		status.add_theme_color_override("font_color", MUTED)
 		bar.value = 0.0
-	elif id in ["swords", "meteor"]:
-		status.text = "普攻触发追击" if id == "swords" else "攻击概率落星"
+	elif id == "swords":
+		status.text = "%d 柄 · 自动穿插" % definition.count_at(level)
 		status.add_theme_color_override("font_color", TEAL)
 		bar.value = 1.0
+	elif id == "meteor":
+		status.text = "攻击概率落星"
+		status.add_theme_color_override("font_color", TEAL)
+		bar.value = 1.0
+	elif id == "thunder_orb":
+		status.text = "%d 颗 · 自动索敌" % definition.count_at(level) if cooldown <= 0.0 else "%d 颗 · %.1f 秒后投射" % [definition.count_at(level), cooldown]
+		status.add_theme_color_override("font_color", TEAL if cooldown <= 0.0 else MUTED)
+		bar.value = clampf(1.0 - cooldown / maxf(0.1, float(definition.cooldown) * float(arena.player.stats.cooldown_multiplier)), 0.0, 1.0)
 	elif active:
 		status.text = "解放中  %.1f 秒" % remaining
 		status.add_theme_color_override("font_color", GOLD)
@@ -384,6 +394,7 @@ func _build_gameplay() -> void:
 	_make_skill("ghost", "厉鬼", "G / B")
 	_make_skill("swords", "万剑归宗", "被动")
 	_make_skill("meteor", "流星", "被动")
+	_make_skill("thunder_orb", "雷缚珠", "被动 · 固定光")
 	_hint = _label(column, "WASD / 左摇杆移动  ·  自动攻击  ·  击杀拾取经验，升级选择成长", 12, MUTED, HORIZONTAL_ALIGNMENT_CENTER)
 
 
@@ -395,8 +406,11 @@ func _make_skill(id: String, title: String, key: String) -> void:
 	key_label.name = "Binding"
 	var title_label := _label(column, title, 16, INK)
 	var status := _label(column, "升级时可领悟", 12, MUTED)
+	for label in [key_label, title_label, status]:
+		label.clip_text = true
+		label.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
 	var bar := _bar(column, TEAL if id != "ghost" else GOLD, 3)
-	_skill_widgets[id] = {"title": title_label, "status": status, "bar": bar}
+	_skill_widgets[id] = {"title": title_label, "status": status, "bar": bar, "binding": key_label}
 
 
 func _build_pause() -> void:
@@ -520,10 +534,17 @@ func _fit_layout() -> void:
 	var margin := 14 if size.x < 1100.0 else 22
 	for side in ["left", "top", "right", "bottom"]:
 		_base.add_theme_constant_override("margin_" + side, margin)
-	_skill_row.custom_minimum_size.x = minf(900.0, maxf(0.0, size.x - margin * 2.0))
+	_skill_row.custom_minimum_size.x = minf(1040.0, maxf(0.0, size.x - margin * 2.0))
+	for widgets in _skill_widgets.values():
+		widgets.title.add_theme_font_size_override("font_size", 15 if size.x < 1100.0 else 16)
+		widgets.status.add_theme_font_size_override("font_size", 11 if size.x < 1100.0 else 12)
+		widgets.binding.add_theme_font_size_override("font_size", 10 if size.x < 1100.0 else 11)
 	_choice_box.custom_minimum_size.x = minf(1020.0, maxf(0.0, size.x - 56.0))
 	for button in _choice_buttons:
-		button.custom_minimum_size.y = 238.0 if size.y >= 680.0 else 218.0
+		button.custom_minimum_size.y = 280.0 if size.y >= 680.0 else 260.0
+	for labels in _choice_labels:
+		labels.title.add_theme_font_size_override("font_size", 22 if size.y >= 680.0 else 20)
+		labels.description.add_theme_font_size_override("font_size", 15 if size.y >= 680.0 else 14)
 
 
 func _panel(parent: Node) -> PanelContainer:

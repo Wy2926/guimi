@@ -19,6 +19,8 @@ var max_draw_calls := 0
 var max_nodes := 0
 var max_active_swords := 0
 var max_active_meteors := 0
+var max_active_orbs := 0
+var orb_checks_completed := false
 var performance: Dictionary = {"requested": false}
 
 func _ready() -> void:
@@ -48,6 +50,7 @@ func _process(delta: float) -> void:
 	max_nodes = maxi(max_nodes, int(Performance.get_monitor(Performance.OBJECT_NODE_COUNT)))
 	max_active_swords = maxi(max_active_swords, scene.storm.active_swords)
 	max_active_meteors = maxi(max_active_meteors, scene.storm.meteors.size())
+	max_active_orbs = maxi(max_active_orbs, scene.orbs.orbs.size())
 
 func check(condition: bool, message: String) -> void:
 	(checks if condition else failures).append(message)
@@ -131,6 +134,7 @@ func run() -> void:
 		return
 	scene.set_frame_limit(requested_fps)
 	check(scene.player.progression == scene.progression and scene.storm.player == scene.player and scene.storm.progression == scene.progression and scene.storm.feedback == scene.feedback and scene.storm.camera == scene.camera, "Combat dependencies are explicitly supplied by the scene")
+	check(scene.orbs.player == scene.player and scene.orbs.progression == scene.progression and scene.orbs.feedback == scene.feedback and scene.orbs.camera == scene.camera, "Periodic orb dependencies are explicitly supplied by the scene")
 	check(scene.camera.projection == Camera3D.PROJECTION_ORTHOGONAL, "The game uses an orthographic 2.5D view")
 	var pitch := rad_to_deg(asin(clampf(scene.camera.global_basis.z.y, -1.0, 1.0)))
 	check(pitch >= 55.0 and pitch <= 65.0, "Camera elevation is between 55 and 65 degrees")
@@ -144,12 +148,15 @@ func run() -> void:
 	await capture("playing")
 	check_damage_rules()
 	check_progression()
+	await check_skill_upgrade_ui()
 	await check_automatic_combat()
 	await check_active_skills()
 	await check_incoming_damage()
 	await check_pickups_and_choices()
 	await check_pause()
 	await check_auxiliary_skills()
+	await check_thunder_orbs()
+	check(orb_checks_completed, "The periodic-orb integration checks reach completion without a skipped runtime error")
 	await check_crowd_hits()
 	await check_restart()
 	await check_waves_and_endings()
@@ -206,6 +213,12 @@ func check_progression() -> void:
 	for option: Dictionary in first._available_choices():
 		ids.append(option.id)
 	check(ids.has("magic_attack") and ids.has("independent_attack"), "Unlocking meteor and swords enables their matching attack upgrades")
+	var sword_definition := first.skill("swords")
+	var orb_definition := first.skill("thunder_orb")
+	var authored_growth := true
+	for rank in range(1, 6):
+		authored_growth = authored_growth and sword_definition.count_at(rank) == rank + 1 and orb_definition.count_at(rank) == [1, 1, 2, 2, 3][rank - 1]
+	check(authored_growth and orb_definition.element == DamageRules.Element.LIGHT and orb_definition.radius_at(5) > orb_definition.radius_at(1) and orb_definition.visual_scale_at(5) > orb_definition.visual_scale_at(1), "Five authored skill ranks grow swords from two to six and fixed-light orbs from one to three with larger coverage")
 	first.skills.slash = 5
 	ids.clear()
 	for option: Dictionary in first._available_choices():
@@ -299,6 +312,41 @@ func check_automatic_combat() -> void:
 	var view_height: float = get_viewport().get_visible_rect().size.y
 	var edge_reached: bool = Vector2(scene.player.position.x, scene.player.position.z).length() >= scene.player.arena_radius - 1.0
 	check(edge_reached and foot.y > 0.0 and foot.y < view_height * 0.83, "After WASD movement settles at the bottom boundary, the player's feet stay above the bottom HUD safety line")
+
+func check_skill_upgrade_ui() -> void:
+	await prepare(false)
+	scene.progression.skills.swords = 4
+	scene.progression.skills.thunder_orb = 4
+	scene.progression.skills.meteor = 1
+	var options: Array[Dictionary] = []
+	var pool: Array[Dictionary] = scene.progression._available_choices()
+	for desired: String in ["skill_swords", "skill_thunder_orb", "element_fire"]:
+		for option: Dictionary in pool:
+			if option.id == desired:
+				options.append(option)
+	check(options.size() == 3 and options[0].description.contains("5 → 6") and options[1].description.contains("2 → 3") and options[1].description.contains("光") and options[2].description.contains("雷缚珠"), "Upgrade cards expose sword and orb counts, larger coverage and the protected light element")
+	scene.progression.choices = options
+	scene.progression.pending_levels = 1
+	scene._on_choices(options)
+	if not headless:
+		var original := DisplayServer.window_get_size()
+		DisplayServer.window_set_size(Vector2i(960, 600))
+		await physics_wait(0.1)
+		await capture("skill-upgrades-960x600")
+		var content_fits := true
+		for i in scene.hud._choice_buttons.size():
+			var box: Rect2 = scene.hud._choice_buttons[i].get_global_rect()
+			var description: Label = scene.hud._choice_labels[i].description
+			content_fits = content_fits and box.encloses(description.get_global_rect())
+		check(content_fits, "The longer new skill descriptions stay within their native cards at the minimum window size")
+		DisplayServer.window_set_size(original)
+		await physics_wait(0.1)
+	# Use the connected native button signal, not a direct write to the skill rank.
+	scene.hud._choice_buttons[1].pressed.emit()
+	check(scene.state == "playing" and scene.progression.skill_level("thunder_orb") == 5, "Selecting the new skill card immediately upgrades its real run state and resumes play")
+	# HUD labels intentionally refresh every 80 ms; wait for that existing presentation tick.
+	var hud_updated := await until(func() -> bool: return scene.hud._skill_widgets.size() == 5 and scene.hud._skill_widgets.thunder_orb.title.text.contains("Lv.5"), 0.25)
+	check(hud_updated, "The fifth HUD slot reflects the selected skill rank on its normal presentation refresh")
 
 func check_active_skills() -> void:
 	await prepare(false)
@@ -493,20 +541,144 @@ func check_auxiliary_skills() -> void:
 	scene.progression.skills.swords = 1
 	scene.storm.refresh_skills()
 	var original_ids := blade_ids()
-	check(original_ids.size() == 8 and scene.storm.slots.size() == 8, "Unlocking swords instantiates exactly eight source-asset blades")
+	check(original_ids.size() == 2 and scene.storm.slots.size() == 2, "Unlocking swords instantiates exactly two source-asset blades")
+	await physics_wait(0.04)
+	var standing: bool = (scene.storm.halo.global_position - scene.player.global_position).dot(scene.player.facing) < -0.5
+	for blade: Node3D in scene.storm.blades:
+		standing = standing and blade.global_basis.y.normalized().dot(Vector3.UP) > 0.99 and blade.scale.x >= 1.7
+	check(standing, "Idle blades stand upright behind the fighter and are visibly enlarged")
+	await capture("swords-two-standing")
 	var peak := 0
-	for attempt in 4:
+	var continuous := true
+	var upgraded_ids: Array[int] = []
+	for attempt in 12:
 		scene.storm.on_swing(false)
+		if attempt == 4:
+			scene.progression.skills.swords = 5
+			scene.storm.refresh_skills()
+			upgraded_ids = blade_ids()
+			check(upgraded_ids.size() == 6 and upgraded_ids[0] == original_ids[0] and upgraded_ids[1] == original_ids[1], "Upgrading during flight adds blades up to six without replacing either original sword")
 		for frame in 36:
 			await get_tree().physics_frame
 			peak = maxi(peak, scene.storm.active_swords)
-	await physics_wait(2.0)
-	var returned: bool = scene.storm.active_swords == 0 and blade_ids() == original_ids
+			for flight: Dictionary in scene.storm.flights:
+				continuous = continuous and not flight.returning
+	check(continuous and scene.storm.chain_count > 0, "Continuous attacks chain actual blade passes through the battlefield without returning home")
+	await capture("swords-battlefield")
+	await until(func() -> bool: return scene.storm.active_swords == 0, 4.0)
+	var returned: bool = scene.storm.active_swords == 0 and blade_ids() == upgraded_ids
 	for index in scene.storm.blades.size():
-		returned = returned and scene.storm.blades[index].get_parent() == scene.storm.slots[index]
-	check(peak > 0 and peak <= 8 and scene.storm.blades.size() == 8, "Repeated volleys never create more than the eight physical blades")
+		returned = returned and scene.storm.blades[index].get_parent() == scene.storm.slots[index] and scene.storm.blades[index].global_basis.y.normalized().dot(Vector3.UP) > 0.99 and scene.storm.blades[index].scale.x >= 1.7
+	check(peak > 0 and peak <= 6 and scene.storm.blades.size() == 6, "Repeated volleys never create more than the six physical blades")
 	check(scene.storm.sword_hits > 0 and target.health < 10000.0 and scene.storm.meteor_count == 0, "Fixed-damage swords hit through high double defense without unlocking meteor")
-	check(returned, "The same eight blade instances return to their formation after attacks")
+	check(returned, "The same six blade instances return upright after the attack sequence ends")
+	await capture("swords-six-standing")
+
+func check_thunder_orbs() -> void:
+	await prepare(false)
+	var target := enemy_at(Vector3(0, 0.04, -4.0), 10000.0)
+	await physics_wait(0.15)
+	check(scene.orbs.orbs.is_empty() and scene.orbs.cast_count == 0, "The locked light-orb passive cannot fire")
+	scene.player.stats.magic_attack = 80.0
+	scene.player.stats.element = DamageRules.Element.FIRE
+	scene.player.stats.element_bonus[0] = 0.8
+	scene.player.stats.element_bonus[2] = 0.2
+	scene.player.stats.life_steal = 0.1
+	scene.player.health = 50.0
+	target.stats.resistances = [-0.2, 0.0, 0.4, 0.0]
+	scene.progression.skills.ghost = 1
+	scene.player.request_ghost()
+	scene.progression.skills.thunder_orb = 1
+	scene.orbs.refresh_skills()
+	var received: Array[Dictionary] = []
+	var record_hit: Callable = func(_target: Node3D, _point: Vector3, result: Dictionary, _heavy: bool, source: String) -> void:
+		if source == "雷缚珠":
+			received.append(result.duplicate())
+	scene.player.hit_confirmed.connect(record_hit)
+	var launched := await until(func() -> bool: return scene.orbs.cast_count == 1, 0.3)
+	check(launched and scene.orbs.orbs.size() == 1 and scene.player.attack_count == 0, "One light orb casts periodically without a basic attack or swing event")
+	if not launched or scene.orbs.orbs.is_empty():
+		scene.player.hit_confirmed.disconnect(record_hit)
+		return
+	var orb: Node3D = scene.orbs.orbs[0]
+	await physics_wait(0.25)
+	await capture("thunder-orb-one")
+	var landed := await until(func() -> bool: return not received.is_empty(), 2.0)
+	check(landed and received[0].element == DamageRules.Element.LIGHT and received[0].damage == 38 and scene.player.ghost_active, "A real orb retains light damage under fire enchantment and ghost, using light resistance rather than fire bonuses")
+	check(landed and scene.player.health > 50.0 and target._stagger_left > 0.0 and target._push.dot(orb.direction) > 4.0, "Orb hits reuse life steal and visibly stagger and push ordinary enemies along the projectile heading")
+	check(scene.storm.volley_count == 0 and scene.storm.meteor_rolls == 0, "Orb damage never recursively starts flying swords or meteor rolls")
+	if not is_instance_valid(orb):
+		scene.player.hit_confirmed.disconnect(record_hit)
+		return
+	# Keep the native Area over the target to verify sustained-overlap hit intervals.
+	orb.speed = 0.0
+	orb.global_position = target.global_position + Vector3.UP * 0.85
+	var hits_before: int = scene.orbs.hit_count
+	await physics_wait(0.15)
+	check(scene.orbs.hit_count == hits_before, "A single orb cannot damage the same overlapping enemy every physics tick")
+	await physics_wait(0.25)
+	check(scene.orbs.hit_count == hits_before + 1, "An enemy remaining inside the native orb area is hit again after its interval")
+	scene.toggle_pause()
+	var frozen_position: Vector3 = orb.global_position
+	var frozen_life: float = orb.life_left
+	var frozen_age: float = orb.age
+	var frozen_cooldown: float = scene.orbs.cooldown_left
+	var frozen_hits: int = scene.orbs.hit_count
+	await physics_wait(0.25)
+	check(orb.global_position == frozen_position and orb.life_left == frozen_life and orb.age == frozen_age and scene.orbs.cooldown_left == frozen_cooldown and scene.orbs.hit_count == frozen_hits, "Pause freezes orb movement, visual clock, lifetime, cooldown and contact damage")
+	scene.toggle_pause()
+	var old_radius: float = orb.radius
+	var old_coefficient: float = orb.coefficient
+	scene.progression.skills.thunder_orb = 5
+	scene.orbs.refresh_skills()
+	check(scene.orbs.orbs.has(orb) and orb.radius == old_radius and orb.coefficient == old_coefficient and scene.orbs.cooldown_left == frozen_cooldown, "Upgrading an orb preserves its live cast snapshot and remaining cooldown")
+	scene.orbs.cooldown_left = 0.0
+	await physics_wait(0.04)
+	check(scene.orbs.cast_count == 2 and scene.orbs.orbs.size() == 4, "The next rank-five cast adds three orbs while the old orb completes its lifetime")
+	if scene.orbs.orbs.size() >= 4:
+		var second: Node3D = scene.orbs.orbs[1]
+		var third: Node3D = scene.orbs.orbs[2]
+		check(is_equal_approx(second.radius, 1.45) and is_equal_approx(second.visual_scale, 1.6), "Rank-five projectiles have the authored larger body and effect radius")
+		check(second.global_position.distance_to(third.global_position) > 1.1 and second.direction.dot(third.direction) > 0.999, "A three-orb cast separates its bodies into neighboring lanes without missing its sole target")
+		await capture("thunder-orb-three")
+		var health_before := target.health
+		scene.orbs._control_cooldowns.clear()
+		scene.orbs.contact(target, second)
+		var first_push: Vector3 = target._push
+		target._push = Vector3.ZERO
+		scene.orbs.contact(target, third)
+		check(is_equal_approx(health_before - target.health, 138.0) and first_push.length() > 4.0 and target._push == Vector3.ZERO, "Two orbs deal independent damage but share the per-enemy knockback interval")
+		var elite := enemy_at(Vector3(4, 0.04, -4), 10000.0)
+		elite.elite = true
+		var boss_target := enemy_at(Vector3(-4, 0.04, -4), 10000.0)
+		boss_target.boss = true
+		scene.orbs.contact(elite, second)
+		scene.orbs.contact(boss_target, second)
+		check(is_equal_approx(elite._push.length(), 1.5) and is_equal_approx(elite._stagger_left, 0.035) and boss_target._push == Vector3.ZERO and boss_target._stagger_left == 0.0 and boss_target.health < 10000.0, "Orb control is reduced on elites and absent on bosses while their damage still applies")
+	scene.player.hit_confirmed.disconnect(record_hit)
+	scene.orbs.cooldown_left = 100.0
+	await until(func() -> bool: return scene.orbs.orbs.is_empty(), 4.2)
+	check(scene.orbs.orbs.is_empty(), "Every light orb expires and removes itself without accumulating projectiles")
+	await prepare(false)
+	scene.progression.skills.thunder_orb = 1
+	scene.orbs.refresh_skills()
+	await physics_wait(0.25)
+	check(scene.orbs.cast_count == 0 and scene.orbs.cooldown_left == 0.0, "A ready periodic skill with no visible target does not waste its cooldown")
+	target = enemy_at(Vector3(0, 0.04, -13.0), 500.0)
+	await physics_wait(0.15)
+	check(scene.orbs.cast_count == 0, "The orb does not automatically launch at enemies beyond its targeting range")
+	target.position = Vector3(0, 0.04, -4)
+	await until(func() -> bool: return scene.orbs.cast_count > 0, 0.3)
+	var death_orbs: Array[int] = []
+	for current: Node3D in scene.orbs.orbs:
+		death_orbs.append(current.get_instance_id())
+	scene.player.receive_damage({"damage": 10000, "dodged": false}, Vector3.ZERO)
+	await physics_wait(0.05)
+	var expired_on_death: bool = scene.orbs.orbs.is_empty()
+	for instance_id in death_orbs:
+		expired_on_death = expired_on_death and not is_instance_id_valid(instance_id)
+	check(not death_orbs.is_empty() and scene.state == "lost" and expired_on_death, "Death cancels and frees every active orb even while the result pauses the tree")
+	orb_checks_completed = true
 
 func check_crowd_hits() -> void:
 	await prepare(false)
@@ -540,7 +712,9 @@ func check_restart() -> void:
 	scene.progression.skills.swords = 1
 	scene.progression.skills.meteor = 1
 	scene.progression.skills.ghost = 1
+	scene.progression.skills.thunder_orb = 5
 	scene.storm.refresh_skills()
+	scene.orbs.refresh_skills()
 	scene.storm.on_swing(true)
 	scene.storm._call_meteor(target)
 	scene.player.request_ghost()
@@ -551,6 +725,9 @@ func check_restart() -> void:
 	var dropped := enemy_at(Vector3(7, 0.04, 0), 1.0)
 	scene.player.deal_damage(dropped, 2, 100.0, 0)
 	await physics_wait(0.04)
+	var old_orbs: Array[int] = []
+	for orb: Node3D in scene.orbs.orbs:
+		old_orbs.append(orb.get_instance_id())
 	scene.progression.add_experience(100)
 	check(scene.state == "choosing" and scene.progression.pending_levels > 0 and not scene.storm.meteors.is_empty() and scene.drops.get_child_count() > 0, "Reset fixture contains pending upgrades, a dropped pickup and in-flight effects")
 	scene.restart()
@@ -559,12 +736,15 @@ func check_restart() -> void:
 	check(scene.state == "playing" and not get_tree().paused and scene.ready_to_play, "Restart synchronously returns the existing scene to play")
 	check(scene.enemies.get_child_count() == 0 and scene.drops.get_child_count() == 0 and scene.director.get_alive_count() == 0 and scene.director._pending.is_empty(), "Restart clears all enemy, projectile, drop and scheduled-spawn owners")
 	check(scene.storm.active_swords == 0 and scene.storm.meteors.is_empty() and scene.storm.blades.is_empty(), "Restart removes in-flight swords, meteor state and the now-locked formation")
+	check(not old_orbs.is_empty() and scene.orbs.orbs.is_empty() and scene.orbs.cast_count == 0 and scene.orbs.cooldown_left == 0.0 and scene.progression.skill_level("thunder_orb") == 0, "Restart clears the new periodic skill, its cast counters, cooldown and locked rank")
 	check(scene.progression.level == 1 and scene.progression.xp == 0 and scene.progression.pending_levels == 0 and scene.progression.choices.is_empty(), "Restart clears level, XP and every pending choice")
 	check(scene.player.health == scene.player.stats.max_health and not scene.player.dead and not scene.player.ghost_active and scene.player.skill_cooldown == 0.0 and scene.player.ghost_cooldown == 0.0 and scene.defeat_count == 0 and scene.hit_count == 0, "Restart resets health, death, buffs, cooldowns and run counters")
 	await physics_wait(0.05)
 	var freed := not is_instance_id_valid(enemy_id) and not is_instance_id_valid(old_feedback_id)
 	for blade_id: int in old_blades:
 		freed = freed and not is_instance_id_valid(blade_id)
+	for orb_id: int in old_orbs:
+		freed = freed and not is_instance_id_valid(orb_id)
 	check(freed, "Old enemies, effect-owned tweens and formation instances are actually freed")
 	await physics_wait(1.1)
 	check(scene.enemies.get_child_count() == 0 and scene.drops.get_child_count() == 0 and scene.hit_count == 0 and scene.player.health == scene.player.stats.max_health, "Cancelled old impacts and pickups cannot reappear after restart")
@@ -622,10 +802,13 @@ func check_short_load() -> void:
 	await prepare(true)
 	scene.player.stats.max_health = 100000.0
 	scene.player.health = 100000.0
-	scene.progression.skills.swords = 1
+	scene.progression.skills.swords = 5
 	scene.progression.skills.meteor = 1
 	scene.progression.skills.ghost = 1
+	scene.progression.skills.thunder_orb = 5
+	scene.player.stats.cooldown_multiplier = 0.4
 	scene.storm.refresh_skills()
+	scene.orbs.refresh_skills()
 	scene.player.request_ghost()
 	for index in performance_enemies:
 		var angle := TAU * float(index) / float(performance_enemies)
@@ -648,7 +831,7 @@ func check_short_load() -> void:
 	performance = {
 		"requested": true,
 		"scope": "headless_logic_load_only_not_rendered_fps" if headless else "rendered_short_fixture_not_target_hardware_guarantee",
-		"fixture": "Real AI enemies, all three optional skills unlocked, movement and one forced active cast per 1.25 seconds; elevated health prevents upgrade/death pauses.",
+		"fixture": "Real AI enemies, six chained swords, rank-five light orbs at minimum cooldown, meteor and ghost unlocked, movement and one forced active cast per 1.25 seconds; elevated health prevents upgrade/death pauses.",
 		"requested_enemies": performance_enemies,
 		"remaining_enemies": get_tree().get_nodes_in_group("enemies").size(),
 		"simulation_seconds": 5.0,
@@ -659,9 +842,10 @@ func check_short_load() -> void:
 		"max_nodes": max_nodes,
 		"max_active_swords": max_active_swords,
 		"max_active_meteors": max_active_meteors,
+		"max_active_orbs": max_active_orbs,
 	}
 	check(scene.state == "playing" and not get_tree().paused, "The short crowd-load fixture completes without a state lock or unexpected upgrade pause")
-	check(max_active_swords <= 8 and max_active_meteors <= 2, "Crowd-load auxiliary concurrency stays within its authored limits")
+	check(max_active_swords <= 6 and max_active_meteors <= 2 and max_active_orbs <= 9, "Crowd-load auxiliary concurrency stays within its authored limits")
 	await capture("crowd-%d" % performance_enemies)
 
 func summarize(values: Array[float]) -> Dictionary:

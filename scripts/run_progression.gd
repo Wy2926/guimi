@@ -6,13 +6,14 @@ signal changed
 signal choice_requested(options: Array[Dictionary])
 
 @export var base_stats: BattleStats = preload("res://data/classes/kensei_stats.tres")
-@export var initial_skills: Dictionary = {"slash": 1, "ring": 1, "ghost": 0, "swords": 0, "meteor": 0}
+@export var initial_skills: Dictionary = {"slash": 1, "ring": 1, "ghost": 0, "swords": 0, "meteor": 0, "thunder_orb": 0}
 @export var skill_definitions: Array[SkillDefinition] = [
 	preload("res://data/skills/slash.tres"),
 	preload("res://data/skills/ring.tres"),
 	preload("res://data/skills/ghost.tres"),
 	preload("res://data/skills/swords.tres"),
 	preload("res://data/skills/meteor.tres"),
+	preload("res://data/skills/thunder_orb.tres"),
 ]
 
 const ELEMENT_NAMES: Array[String] = ["无属性", "火", "冰", "光", "暗"]
@@ -21,7 +22,7 @@ const DAMAGE_NAMES: Array[String] = ["物理", "魔法", "固定"]
 const ELEMENT_BONUS_CAP: float = 0.8
 
 var stats: BattleStats
-var skills: Dictionary = {"slash": 1, "ring": 1, "ghost": 0, "swords": 0, "meteor": 0}
+var skills: Dictionary = {"slash": 1, "ring": 1, "ghost": 0, "swords": 0, "meteor": 0, "thunder_orb": 0}
 var level: int = 1
 var xp: int = 0
 var pending_levels: int = 0
@@ -141,6 +142,16 @@ func _available_choices() -> Array[Dictionary]:
 			card_description = "厉鬼持续时间 %.0f → %.0f 秒；强化倍率不变。" % [definition.duration_at(rank), definition.duration_at(rank + 1)]
 		else:
 			card_description = "%s伤害基础倍率 %.0f%% → %.0f%%。" % [DAMAGE_NAMES[definition.kind], definition.coefficient_at(rank) * 100.0, definition.coefficient_at(rank + 1) * 100.0]
+		if not definition.counts.is_empty():
+			card_description += "\n数量 %d" % definition.count_at(1) if rank == 0 else "\n数量 %d → %d" % [definition.count_at(rank), definition.count_at(rank + 1)]
+		if definition.radius > 0.0:
+			card_description += " · 范围半径 %.2f" % definition.radius_at(1) if rank == 0 else " · 范围半径 %.2f → %.2f" % [definition.radius_at(rank), definition.radius_at(rank + 1)]
+		if not is_zero_approx(definition.visual_scale_growth):
+			card_description += "\n球体大小 %.0f%%" % (definition.visual_scale_at(1) * 100.0) if rank == 0 else "\n球体大小 %.0f%% → %.0f%%" % [definition.visual_scale_at(rank) * 100.0, definition.visual_scale_at(rank + 1) * 100.0]
+		if definition.category == "passive" and definition.cooldown > 0.0:
+			card_description += " · 周期 %.1f 秒" % (definition.cooldown * stats.cooldown_multiplier)
+		if definition.element >= 0 and definition.element < ELEMENT_NAMES.size():
+			card_description += "\n固定%s%s，不受附魔覆盖。" % [ELEMENT_NAMES[definition.element], "属性" if definition.element > 0 else ""]
 		candidates.append({"id": "skill_" + definition.id, "title": card_title, "description": card_description, "category": "skill"})
 	_add_stat_option(candidates, "max_health", "生命上限", 25.0, 620.0)
 	if attack_kinds[DamageRules.Kind.PHYSICAL]:
@@ -171,7 +182,7 @@ func _add_stat_option(candidates: Array[Dictionary], id: String, title: String, 
 		return
 	var description: String = "%s %s → %s。" % [title, _format_stat(current, percentage), _format_stat(next, percentage)]
 	if id == "cooldown_multiplier":
-		description += "数值越低，主动技能冷却越短。"
+		description += "数值越低，主动技能及周期技能的冷却越短。"
 	elif id == "life_steal":
 		description += "按实际扣血计算，受群攻恢复上限约束。"
 	candidates.append({"id": id, "title": title, "description": description, "category": "stat", "value": next})
@@ -185,8 +196,12 @@ func _add_element_option(candidates: Array[Dictionary], attack_element: int) -> 
 	var description: String = "%s属强 %.0f%% → %.0f%%，仅该元素命中生效。" % [ELEMENT_NAMES[attack_element], current * 100.0, next * 100.0]
 	if stats.element != attack_element:
 		description = "继承元素的攻击改为%s属性；" % ELEMENT_NAMES[attack_element] + description
-	if skill_level("meteor") > 0 and attack_element != DamageRules.Element.FIRE:
-		description += "流星仍为火属性。"
+	var fixed_elements: PackedStringArray = []
+	for definition: SkillDefinition in skill_definitions:
+		if skill_level(definition.id) > 0 and definition.element >= 0 and definition.element < ELEMENT_NAMES.size():
+			fixed_elements.append("%s（%s）" % [definition.title, ELEMENT_NAMES[definition.element]])
+	if not fixed_elements.is_empty():
+		description += "\n固定元素不变：%s。" % "、".join(fixed_elements)
 	candidates.append({"id": "element_" + ELEMENT_IDS[attack_element], "title": title, "description": description, "category": "element", "element": attack_element, "value": next})
 
 func _format_stat(value: float, percentage: bool) -> String:

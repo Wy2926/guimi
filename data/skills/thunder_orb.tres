@@ -1,0 +1,22 @@
+[gd_resource type="Resource" script_class="SkillDefinition" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/skill_definition.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = "thunder_orb"
+title = "雷缚珠"
+description = "周期自动向敌人投射白色电球，持续4秒；读取魔法攻击力。"
+category = "passive"
+kind = 1
+coefficient = 0.6
+coefficient_growth = 0.2
+element = 3
+cooldown = 4.5
+max_level = 5
+duration = 4.0
+counts = Array[int]([1, 1, 2, 2, 3])
+radius = 0.85
+radius_growth = 0.15
+visual_scale = 1.0
+visual_scale_growth = 0.15

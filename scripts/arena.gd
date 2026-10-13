@@ -3,6 +3,7 @@ extends Node3D
 
 const PLAYER_SCENE = preload("res://scenes/player.tscn")
 const STORM_SCRIPT = preload("res://scripts/sword_storm.gd")
+const ORBS_SCRIPT = preload("res://scripts/thunder_orbs.gd")
 const FEEDBACK_SCRIPT = preload("res://scripts/feedback.gd")
 const ARENA_RADIUS := 15.8
 const CAMERA_OFFSET := Vector3(10, 24, 10)
@@ -17,6 +18,7 @@ var player: DuelFighter
 var progression: RunProgression
 var director: WaveDirector
 var storm: Node3D
+var orbs: Node3D
 var boss: Node3D
 var state := "loading"
 var ready_to_play := false
@@ -47,6 +49,13 @@ func _ready() -> void:
 	storm.feedback = feedback
 	storm.camera = camera
 	add_child(storm)
+	orbs = ORBS_SCRIPT.new()
+	orbs.name = "ThunderOrbs"
+	orbs.player = player
+	orbs.progression = progression
+	orbs.feedback = feedback
+	orbs.camera = camera
+	add_child(orbs)
 	director = WaveDirector.new()
 	director.name = "Waves"
 	director.player = player
@@ -144,6 +153,7 @@ func choose_upgrade(index: int) -> void:
 	player.health = minf(player.stats.max_health, player.health + maxf(0.0, player.stats.max_health - previous_health))
 	player._refresh_range()
 	storm.refresh_skills()
+	orbs.refresh_skills()
 	if progression.pending_levels == 0:
 		hud.choice_panel.hide()
 		state = "playing"
@@ -202,7 +212,7 @@ func _on_hit(target: Node3D, point: Vector3, result: Dictionary, heavy: bool, so
 	var direction := (target.global_position - player.global_position).normalized()
 	if source == "飞剑":
 		feedback.storm_hit(point, direction, lethal)
-	elif source != "流星":
+	elif source not in ["流星", "雷缚珠"]:
 		feedback.impact(point, direction, lethal, heavy, player.ghost_active, player.combo_finisher)
 	shake_time = 0.16
 	shake_power = 0.055 if heavy else 0.025
@@ -226,8 +236,10 @@ func _finish(won: bool) -> void:
 	player.enabled = false
 	director.enabled = false
 	storm.set_physics_process(false)
+	orbs.set_physics_process(false)
 	# A lethal meteor can be inside its own iteration; release attacks afterwards.
 	storm.reset.call_deferred()
+	orbs.reset.call_deferred()
 	get_tree().paused = true
 	hud.show_result(won)
 
@@ -240,6 +252,7 @@ func restart() -> void:
 	progression.reset()
 	player.reset_fighter()
 	storm.reset()
+	orbs.reset()
 	director.reset()
 	for container in [enemies, drops]:
 		for child in container.get_children():
@@ -253,6 +266,7 @@ func restart() -> void:
 	add_child(feedback)
 	player.feedback = feedback
 	storm.feedback = feedback
+	orbs.feedback = feedback
 	boss = null
 	hit_count = 0
 	defeat_count = 0
@@ -263,6 +277,7 @@ func restart() -> void:
 	camera.look_at(focus)
 	hud.reset_hud()
 	storm.set_physics_process(true)
+	orbs.set_physics_process(true)
 	player.enabled = true
 	ready_to_play = true
 	state = "playing"

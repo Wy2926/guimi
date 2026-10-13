@@ -300,7 +300,7 @@ func _launch_projectile(direction: Vector3, speed: float, coefficient: float) ->
 	projectile.top_level = true
 	projectile.global_position = global_position + Vector3.UP * 0.95 + direction * 0.7
 
-func receive_damage(result: Dictionary, direction: Vector3, heavy := false, spectral := false) -> Dictionary:
+func receive_damage(result: Dictionary, direction: Vector3, heavy := false, spectral := false, apply_control := true) -> Dictionary:
 	var applied := result.duplicate()
 	applied["actual"] = 0.0
 	applied["lethal"] = false
@@ -314,7 +314,7 @@ func receive_damage(result: Dictionary, direction: Vector3, heavy := false, spec
 	flash_material.set_shader_parameter("flash", 0.4 if spectral else 0.65)
 	flash_material.set_shader_parameter("tint", Color("ffd6a0") if heavy else Color("bceeff"))
 	_set_flash_visible(true)
-	if not boss:
+	if not boss and apply_control:
 		_push = direction.normalized() * ((0.7 if elite else 1.6) if spectral else (1.5 if elite else (4.3 if heavy else 2.1)))
 		if _poise_left <= 0.0 and _state != State.CHARGE:
 			_stagger_left = 0.035 if elite else (0.09 if spectral else 0.14)

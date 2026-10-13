@@ -1,6 +1,6 @@
 class_name SkillDefinition
 extends Resource
-## Data for the five authored skills, not an executable skill graph.
+## Authored skill data, not an executable skill graph.
 
 @export var id: String = ""
 @export var title: String = ""
@@ -16,6 +16,11 @@ extends Resource
 @export var duration_growth: float = 0.0
 @export var damage_multiplier: float = 1.0
 @export var attack_speed_multiplier: float = 1.0
+@export var counts: Array[int] = []
+@export var radius: float = 0.0
+@export var radius_growth: float = 0.0
+@export var visual_scale: float = 1.0
+@export var visual_scale_growth: float = 0.0
 
 func coefficient_at(level: int) -> float:
 	if level <= 0:
@@ -26,3 +31,18 @@ func duration_at(level: int) -> float:
 	if level <= 0:
 		return 0.0
 	return duration + duration_growth * float(clampi(level, 1, max_level) - 1)
+
+func count_at(level: int) -> int:
+	if level <= 0 or counts.is_empty():
+		return 0
+	return maxi(0, counts[mini(clampi(level, 1, max_level) - 1, counts.size() - 1)])
+
+func radius_at(level: int) -> float:
+	if level <= 0:
+		return 0.0
+	return maxf(0.0, radius + radius_growth * float(clampi(level, 1, max_level) - 1))
+
+func visual_scale_at(level: int) -> float:
+	if level <= 0:
+		return 0.0
+	return maxf(0.0, visual_scale + visual_scale_growth * float(clampi(level, 1, max_level) - 1))
