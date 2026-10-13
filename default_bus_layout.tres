@@ -1,0 +1,17 @@
+[gd_resource type="AudioBusLayout" format=3 uid="uid://m0w24bu66abu"]
+
+[sub_resource type="AudioEffectLimiter" id="Limiter"]
+resource_name = "Safety limiter"
+ceiling_db = -0.6
+threshold_db = -2.0
+
+[resource]
+bus/0/volume_db = -3.0
+bus/0/effect/0/effect = SubResource("Limiter")
+bus/0/effect/0/enabled = true
+bus/1/name = &"SFX"
+bus/1/solo = false
+bus/1/mute = false
+bus/1/bypass_fx = false
+bus/1/volume_db = -1.0
+bus/1/send = &"Master"
