@@ -1,0 +1,17 @@
+[gd_scene load_steps=3 format=3]
+
+[ext_resource type="PackedScene" path="res://assets/weapons/niko_katana/katana_no_case.fbx" id="1_sword"]
+[ext_resource type="Material" path="res://assets/weapons/niko_katana/katana_material.tres" id="2_material"]
+
+[node name="Sword" type="Node3D"]
+
+[node name="Model" parent="." instance=ExtResource("1_sword")]
+position = Vector3(0.2848, 0.544, 0.0192)
+rotation = Vector3(0, 0, 1.57079632679)
+scale = Vector3(0.16, 0.16, 0.16)
+
+[node name="Cube_002_Cube_002" parent="Model" index="0"]
+cast_shadow = 0
+material_override = ExtResource("2_material")
+
+[editable path="Model"]

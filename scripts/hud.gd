@@ -11,7 +11,7 @@ const DISPLAY = preload("res://assets/fonts/display.tres")
 var displayed_hp := 1.0
 var chip_hp := 1.0
 var hit_glow := 0.0
-var notice := "J 试刀  ·  K 释放裂环斩"
+var notice := "按住 J / 左键 连段  ·  G 切换厉鬼  ·  K 裂环斩"
 var notice_left := 7.0
 var popups: Array[Dictionary] = []
 var pause_panel: Control
@@ -62,12 +62,12 @@ func reset_hud() -> void:
 	displayed_hp = 1.0
 	chip_hp = 1.0
 	hit_glow = 0.0
-	notice = "J 试刀  ·  K 释放裂环斩"
+	notice = "按住 J / 左键 连段  ·  G 切换厉鬼  ·  K 裂环斩"
 	notice_left = 4.0
 
-func hit(point: Vector3, lethal: bool, damage: int, heavy: bool) -> void:
+func hit(point: Vector3, lethal: bool, damage: int, heavy: bool, source: String = "") -> void:
 	hit_glow = 1.0
-	popups.append({"point": point + Vector3.UP * 2.2, "age": 0.0, "lethal": lethal, "damage": damage, "heavy": heavy})
+	popups.append({"point": point + Vector3.UP * 2.2, "age": 0.0, "lethal": lethal, "damage": damage, "heavy": heavy, "source": source, "offset": float(popups.size() % 3 - 1) * 21.0 if source == "厉鬼" else 0.0})
 	notice = "击破 · 守卫即将归位" if lethal else ""
 	notice_left = 2.8 if lethal else 0.0
 
@@ -86,36 +86,85 @@ func _draw() -> void:
 	_right("一击之间，自有分量。", Vector2(w - m, 92), 14, MUTED)
 	_right("COMBAT STUDY  ·  %d FPS" % arena.frame_limit, Vector2(w - m, 119), 11, GOLD, DISPLAY)
 	var center := w / 2.0
-	_center("骸 骨 守 卫", Vector2(center, 65), 18, INK)
-	var bar := Rect2(center - 140, 82, 280, 5)
-	draw_rect(bar, Color(0.04, 0.075, 0.085, 0.9))
-	draw_rect(Rect2(bar.position, Vector2(bar.size.x * chip_hp, 5)), GOLD.darkened(0.25))
-	draw_rect(Rect2(bar.position, Vector2(bar.size.x * displayed_hp, 5)), Color("d68965").lerp(INK, hit_glow * 0.4))
-	for i in range(1, 4):
-		draw_line(bar.position + Vector2(i * 70, 0), bar.position + Vector2(i * 70, 5), Color("17272e"), 2)
-	_center("%03d  /  100" % arena.enemy.health, Vector2(center, 108), 12, MUTED)
-	# Only the two implemented moves; no empty slots or unrelated systems.
+	var guard_count: int = arena.guards.size()
+	var living_guards := 0
+	_center("骸 骨 守 卫 × %d" % guard_count, Vector2(center, 65), 18, INK)
+	# One segment per guard makes the group state distinct from a single boss bar.
+	var segment_width := (280.0 - maxf(guard_count - 1, 0) * 5.0) / maxf(guard_count, 1)
+	for i in range(guard_count):
+		var guard: DuelFighter = arena.guards[i]
+		if guard.health > 0:
+			living_guards += 1
+		var hp := clampf(float(guard.health) / 100.0, 0.0, 1.0)
+		var segment := Rect2(center - 140 + i * (segment_width + 5), 82, segment_width, 5)
+		draw_rect(segment, Color(0.04, 0.075, 0.085, 0.9))
+		draw_rect(Rect2(segment.position, Vector2(segment_width * hp, 5)), Color("d68965"))
+		if guard.health <= 0 or guard.health >= 100:
+			continue
+		var marker: Vector3 = guard.global_position + Vector3.UP * 2.65
+		if arena.camera.is_position_behind(marker):
+			continue
+		var marker_pos: Vector2 = arena.camera.unproject_position(marker) + Vector2(-26, -12)
+		draw_rect(Rect2(marker_pos - Vector2(1, 1), Vector2(54, 5)), Color(0.025, 0.045, 0.058, 0.9))
+		draw_rect(Rect2(marker_pos, Vector2(52 * hp, 3)), Color("d8ad71"))
+	_center("存活 %02d / %02d" % [living_guards, guard_count], Vector2(center, 108), 12, MUTED)
+	# Two compact stance rows share the original corner; no extra equipment bar.
+	var ghost: bool = arena.player.ghost_active
+	var ghost_pending: bool = arena.player.ghost_requested != ghost
+	var combat_tint := Color("ff8cab") if ghost else GOLD
+	var storm := arena.get("storm") as Node3D
+	var storm_active := is_instance_valid(storm) and bool(storm.get("active"))
+	var storm_tint := Color("a4edf3") if storm_active else MUTED
+	var stance_card := Rect2(m, h - 285, 330, 134)
+	draw_style_box(_panel_style(Color(0.115, 0.042, 0.078, 0.85) if ghost else Color(0.045, 0.09, 0.115, 0.82)), stance_card)
+	_text("厉 鬼 解 放" if ghost else "常 态 连 斩", Vector2(m + 16, h - 260), 20, combat_tint)
+	var ghost_control := "G / B 切换"
+	if ghost_pending:
+		ghost_control = "收势后解放" if arena.player.ghost_requested else "收势后复原"
+	_right(ghost_control, Vector2(m + 310, h - 262), 12, combat_tint if ghost_pending else MUTED)
+	var ghost_stats := "5 式 8 击 · 伤害 +%d%% · 攻速 +%d%%" % [roundi((arena.player.damage_multiplier - 1.0) * 100.0), roundi((arena.player.attack_speed - 1.0) * 100.0)]
+	_text(ghost_stats if ghost else "3 式 3 击 · 按住普攻连续衔接", Vector2(m + 16, h - 239), 12, combat_tint if ghost else MUTED)
+	draw_line(Vector2(m + 16, h - 225), Vector2(m + 314, h - 225), Color(0.60, 0.65, 0.63, 0.2), 1)
+	var storm_icon := Vector2(m + 23, h - 205)
+	for i in range(3):
+		var offset := Vector2((i - 1) * 7, absf(i - 1) * 4)
+		draw_line(storm_icon + offset + Vector2(0, -7), storm_icon + offset + Vector2(0, 9), storm_tint, 1.5, true)
+		draw_line(storm_icon + offset + Vector2(-3, 4), storm_icon + offset + Vector2(3, 4), storm_tint, 1.2, true)
+	_text("万 剑 归 宗", Vector2(m + 44, h - 200), 18, storm_tint)
+	_right("已启" if storm_active else "收阵", Vector2(m + 310, h - 201), 13, storm_tint)
+	_text("L / Y 收放  ·  攻击时群体追击", Vector2(m + 16, h - 181), 12, MUTED)
+	_text("28% 引落流星", Vector2(m + 16, h - 163), 12, GOLD)
+	if is_instance_valid(storm):
+		_right("飞剑 %02d / 8" % int(storm.get("active_swords")), Vector2(m + 310, h - 163), 12, storm_tint)
 	draw_line(Vector2(m, h - 137), Vector2(w - m, h - 137), Color(0.60, 0.65, 0.63, 0.2), 1)
 	_key("W A S D", Vector2(m, h - 103), 91)
 	_text("移动", Vector2(m + 106, h - 82), 16, INK)
 	_text("方向键 / 左摇杆同样可用", Vector2(m, h - 47), 12, MUTED)
 	var state := "就绪"
 	var progress := 1.0
-	if arena.player.attacking and not arena.player.using_skill:
-		var t: float = arena.player.animation.current_animation_position
-		state = "蓄势" if t < DuelFighter.SWING_START else ("挥斩" if t < DuelFighter.ACTIVE_END else "收势")
-		progress = clampf(t / 0.60, 0, 1)
+	var combo_playing: bool = arena.player.attacking and not arena.player.using_skill
+	var combo_title := "厉鬼五连" if ghost else "普通三连"
+	var combo_detail := "5 式 / 8 击" if ghost else "3 式 / 3 击"
+	if combo_playing:
+		state = arena.player.get_attack_phase()
+		combo_title = arena.player.combo_label
+		combo_detail = "%d / %d 式 · %d 段" % [arena.player.combo_index + 1, arena.player.combo_total, arena.player.strike_total]
+		progress = clampf(arena.player.animation.current_animation_position / arena.player.move_duration, 0, 1)
+		for strike in range(arena.player.strike_total):
+			var segment_color := combat_tint if strike <= arena.player.strike_index else combat_tint.darkened(0.70)
+			draw_rect(Rect2(center - 30 - (arena.player.strike_total - strike) * 11, h - 119, 7, 4), segment_color)
+	_text(combo_detail, Vector2(center - 224, h - 111), 11, combat_tint)
 	var icon := Vector2(center - 270, h - 82)
 	var diamond := PackedVector2Array([icon + Vector2(0, -29), icon + Vector2(29, 0), icon + Vector2(0, 29), icon + Vector2(-29, 0), icon + Vector2(0, -29)])
-	draw_polyline(diamond, GOLD.lerp(INK, hit_glow), 1.3, true)
+	draw_polyline(diamond, combat_tint.lerp(INK, hit_glow), 1.3, true)
 	draw_line(icon + Vector2(-9, 11), icon + Vector2(11, -12), INK, 3, true)
-	draw_line(icon + Vector2(-10, 1), icon + Vector2(1, 11), GOLD, 2, true)
+	draw_line(icon + Vector2(-10, 1), icon + Vector2(1, 11), combat_tint, 2, true)
 	draw_line(icon + Vector2(9, -12), icon + Vector2(13, -15), INK, 2, true)
-	_text("横 斩", Vector2(center - 224, h - 88), 24, INK)
-	_text("J / 左键 / 手柄 X", Vector2(center - 224, h - 62), 13, MUTED)
-	_text(state, Vector2(center - 65, h - 88), 13, TEAL if state == "就绪" else GOLD)
+	_text(combo_title, Vector2(center - 224, h - 88), 24, INK)
+	_text("按住 J / 左键 / X 连段", Vector2(center - 224, h - 62), 13, MUTED)
+	_right(state, Vector2(center - 30, h - 88), 13, TEAL if state == "就绪" else combat_tint)
 	draw_rect(Rect2(center - 224, h - 45, 194, 2), Color("23343a"))
-	draw_rect(Rect2(center - 224, h - 45, progress * 194, 2), GOLD if arena.player.attacking and not arena.player.using_skill else TEAL.darkened(0.3))
+	draw_rect(Rect2(center - 224, h - 45, progress * 194, 2), combat_tint if combo_playing else TEAL.darkened(0.3))
 	var cooldown: float = arena.player.skill_cooldown
 	var skill_tint := Color("9becf0") if cooldown <= 0 else TEAL.darkened(0.25)
 	var skill_state := "就绪" if cooldown <= 0 else "%.1f s" % cooldown
@@ -140,12 +189,22 @@ func _draw() -> void:
 		_center(notice, Vector2(center, h - 163), 15, Color(0.87, 0.83, 0.72, minf(notice_left, 0.9)))
 	for item in popups:
 		var p: Vector2 = arena.camera.unproject_position(item.point)
+		p.x += item.offset
 		p.y -= 20 + 54 * item.age
 		var alpha := 1.0 - smoothstep(0.45, 0.85, item.age)
+		var flying_sword: bool = item.source == "飞剑"
+		var meteor: bool = item.source == "流星"
+		var ghost_hit: bool = item.source == "厉鬼"
 		var tint := Color(0.65, 0.97, 1.0, alpha) if item.heavy else Color(1.0, 0.84, 0.54, alpha)
-		_center(str(item.damage), p, 38 if item.heavy else (33 if item.lethal else 29), tint, DISPLAY)
-		if item.lethal or item.heavy:
-			_center("击破" if item.lethal else "裂环斩", p + Vector2(0, 26), 15, tint)
+		if meteor:
+			tint = Color(1.0, 0.75, 0.35, alpha)
+		elif ghost_hit:
+			tint = Color(1.0, 0.49, 0.66, alpha)
+		var damage_size := 20 if flying_sword else (34 if meteor else (38 if item.heavy else (33 if item.lethal else 29)))
+		_center(str(item.damage), p, damage_size, tint, DISPLAY)
+		if item.lethal or meteor or (item.heavy and not flying_sword):
+			var label := "击破" if item.lethal else ("流星" if meteor else ("厉鬼裂环" if ghost_hit else "裂环斩"))
+			_center(label, p + Vector2(0, 19 if flying_sword else 26), 13 if flying_sword else 15, tint)
 
 func _text(value: String, pos: Vector2, font_size: int, color: Color, font: Font = FONT) -> void:
 	draw_string(font, pos, value, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, color)
@@ -226,7 +285,7 @@ func _build_pause() -> void:
 	mute.toggled.connect(func(enabled: bool) -> void: AudioServer.set_bus_mute(0, enabled))
 	column.add_child(mute)
 	var help := Label.new()
-	help.text = "WASD / 左摇杆  移动\nJ / 左键 / X  横斩    K / 右键 / RB  裂环斩\nR / 手柄 Y  重置    F11  全屏"
+	help.text = "WASD / 左摇杆  移动\n按住 J / 左键 / X  连段    K / 右键 / RB  裂环斩\nG / 手柄 B  厉鬼：五式八击 · 伤害与攻速提升\nL / 手柄 Y  收放万剑归宗 · 攻击时群体追击\n攻击有 28% 概率引落流星\nR  重置    F11  全屏"
 	help.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	help.add_theme_font_size_override("font_size", 13)
 	help.modulate = MUTED

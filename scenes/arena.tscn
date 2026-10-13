@@ -1,4 +1,4 @@
-[gd_scene load_steps=19 format=3]
+[gd_scene load_steps=21 format=3]
 
 [ext_resource type="Script" path="res://scripts/arena.gd" id="1"]
 [ext_resource type="Script" path="res://scripts/stage.gd" id="2"]
@@ -8,10 +8,20 @@
 [ext_resource type="Script" path="res://scripts/feedback.gd" id="6"]
 [ext_resource type="Script" path="res://scripts/hud.gd" id="7"]
 
+[sub_resource type="ProceduralSkyMaterial" id="SwordReflectionMaterial"]
+sky_top_color = Color(0.23, 0.31, 0.39, 1)
+sky_horizon_color = Color(0.82, 0.86, 0.91, 1)
+ground_bottom_color = Color(0.13, 0.14, 0.16, 1)
+ground_horizon_color = Color(0.64, 0.69, 0.76, 1)
+
+[sub_resource type="Sky" id="SwordReflectionSky"]
+sky_material = SubResource("SwordReflectionMaterial")
+
 [sub_resource type="Environment" id="Environment"]
 background_mode = 1
 background_color = Color(0.036, 0.065, 0.083, 1)
-ambient_light_source = 3
+sky = SubResource("SwordReflectionSky")
+ambient_light_source = 2
 ambient_light_color = Color(0.4, 0.60, 0.72, 1)
 ambient_light_energy = 0.40
 reflected_light_source = 2

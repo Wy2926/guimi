@@ -16,16 +16,31 @@ var focus := Vector3(0, -0.55, 0)
 var clock := 0.0
 var ready_to_play := false
 var frame_limit := 120
+var guards: Array[DuelFighter] = []
+var storm: Node3D
 
 func _ready() -> void:
 	Input.use_accumulated_input = false
 	player.opponent = enemy
 	enemy.opponent = player
+	guards.append(enemy)
+	# Reuse the same authored guard three times to exercise real multi-target combat.
+	for home in [Vector3(3.2, 0.04, 1.5), Vector3(-2.9, 0.04, -2.2), Vector3(1.0, 0.04, -3.7)]:
+		var guard := enemy.duplicate() as DuelFighter
+		guard.home_position = home
+		guard.opponent = player
+		add_child(guard)
+		guards.append(guard)
+	storm = Node3D.new()
+	storm.set_script(preload("res://scripts/sword_storm.gd"))
+	storm.name = "SwordStorm"
+	add_child(storm)
 	camera.look_at(focus)
 	player.swing_started.connect(_on_windup)
 	player.swing_active.connect(_on_swing)
 	player.skill_released.connect(func() -> void: feedback.skill_release(player))
 	player.hit_confirmed.connect(_on_hit)
+	player.ghost_changed.connect(_on_ghost_changed)
 	var settings := ConfigFile.new()
 	if settings.load("user://settings.cfg") == OK:
 		set_frame_limit(int(settings.get_value("display", "frame_limit", 120)))
@@ -46,6 +61,12 @@ func _unhandled_input(event: InputEvent) -> void:
 	elif event.is_action_pressed("skill") and not event.is_echo():
 		player.request_skill()
 		get_viewport().set_input_as_handled()
+	elif event.is_action_pressed("sword_storm") and not event.is_echo():
+		storm.set_active(not storm.active)
+		get_viewport().set_input_as_handled()
+	elif event.is_action_pressed("ghost_state") and not event.is_echo():
+		player.request_ghost()
+		get_viewport().set_input_as_handled()
 	elif event.is_action_pressed("restart") and not event.is_echo():
 		restart()
 	elif event is InputEventKey and event.pressed and event.keycode == KEY_F11:
@@ -65,7 +86,8 @@ func _process(delta: float) -> void:
 	camera.position = base_camera + Vector3(focus.x, 0, focus.z) + offset
 	camera.look_at(focus)
 	camera.fov = move_toward(camera.fov, 34.0, delta * 7.0)
-	enemy.get_node("Footing").visible = not enemy.dead
+	for guard in guards:
+		guard.get_node("Footing").visible = not guard.dead
 
 func set_frame_limit(fps: int, save := false) -> void:
 	frame_limit = 60 if fps == 60 else 120
@@ -86,29 +108,44 @@ func _on_swing(heavy: bool) -> void:
 	if heavy:
 		feedback.skill_spin(player)
 	else:
-		feedback.slash(player)
+		feedback.slash(player, player.current_move.style, player.ghost_active, player.strike_index, player.combo_finisher)
+	# A multi-hit action still requests auxiliary swords/meteors just once.
+	if player.strike_index == 0:
+		storm.on_swing(heavy)
+
+func _on_ghost_changed(enabled: bool) -> void:
+	feedback.ghost_transition(player, enabled)
+	hud.notice = "厉鬼临身 · 五式八击" if enabled else "收敛鬼气 · 三式连斩"
+	hud.notice_left = 2.0
 
 func _on_hit(target: DuelFighter, point: Vector3, lethal: bool, damage: int, heavy: bool) -> void:
 	hit_count += 1
 	if lethal:
 		defeat_count += 1
 	var direction := (target.position - player.position).normalized() if heavy else player.attack_direction
-	feedback.impact(point, direction, lethal, heavy)
+	var finisher := player.combo_finisher
+	feedback.impact(point, direction, lethal, heavy or finisher, player.ghost_active, finisher)
 	shake_time = 0.22
-	shake_power = 0.12 if heavy else (0.10 if lethal else 0.057)
+	shake_power = 0.12 if heavy or finisher else (0.10 if lethal else (0.038 if player.ghost_active else 0.057))
 	if shake_enabled:
 		camera.fov = 33.0 if heavy else (33.45 if lethal else 33.7)
-	hud.hit(point, lethal, damage, heavy)
+	hud.hit(point, lethal, damage, heavy, "厉鬼" if player.ghost_active else "")
 	var pads := Input.get_connected_joypads()
 	if not pads.is_empty():
 		Input.start_joy_vibration(pads[0], 0.3 if heavy else 0.16, 0.7 if heavy else (0.5 if lethal else 0.28), 0.18 if heavy else 0.12)
 
-func target_respawned() -> void:
+func target_respawned(target: DuelFighter = null) -> void:
+	if target == null:
+		target = enemy
 	# The hero may be standing on the home point when the guard reforms.
-	if enemy.position.distance_to(player.position) < 1.25:
-		enemy.position = Vector3(-1.15, 0.04, 0.6)
-		enemy.reset_physics_interpolation()
-	feedback.ground_ring(enemy.position + Vector3.UP * 0.04, Color("5bced2"), 0.55)
+	if target.position.distance_to(player.position) < 1.25:
+		for offset in [Vector3(-2.3, 0, 0), Vector3(2.3, 0, 0), Vector3(0, 0, -2.3)]:
+			var candidate: Vector3 = target.home_position + offset
+			if Vector2(candidate.x, candidate.z).length() <= 5.2 and candidate.distance_to(player.position) > 1.3:
+				target.position = candidate
+				break
+		target.reset_physics_interpolation()
+	feedback.ground_ring(target.position + Vector3.UP * 0.04, Color("5bced2"), 0.55)
 	hud.notice = "守卫归位"
 	hud.notice_left = 1.5
 
@@ -118,7 +155,9 @@ func footstep(pos: Vector3) -> void:
 func restart() -> void:
 	get_tree().paused = false
 	player.reset_fighter()
-	enemy.reset_fighter()
+	for guard in guards:
+		guard.reset_fighter()
+	storm.reset()
 	hit_count = 0
 	defeat_count = 0
 	shake_time = 0.0
@@ -135,7 +174,8 @@ func restart() -> void:
 
 func _warm_start() -> void:
 	player.set_physics_process(false)
-	enemy.set_physics_process(false)
+	for guard in guards:
+		guard.set_physics_process(false)
 	var veil := ColorRect.new()
 	veil.color = Color("0e191f")
 	veil.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
@@ -147,5 +187,6 @@ func _warm_start() -> void:
 	await reveal.finished
 	veil.queue_free()
 	player.set_physics_process(true)
-	enemy.set_physics_process(true)
+	for guard in guards:
+		guard.set_physics_process(true)
 	ready_to_play = true

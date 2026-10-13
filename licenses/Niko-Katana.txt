@@ -1,0 +1,12 @@
+Katana display / free katana commission
+Copyright Guillaume Bolis (niko-3d-models / guillaume.bolis).
+Licensed under Creative Commons Attribution 4.0 International (CC BY 4.0).
+https://creativecommons.org/licenses/by/4.0/
+
+Source: https://niko-3d-models.itch.io/katana-comission
+Original model: https://sketchfab.com/3d-models/katana-display-985909d7491a41088c081a24377f6037
+
+The original no-case sword FBX and PBR PNG textures are unchanged.
+Godot applies scene transforms, native texture import size limits and DirectX
+normal-map Y inversion, and connects the original maps to a StandardMaterial3D.
+Credit the author and retain this notice when redistributing these assets.
