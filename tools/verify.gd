@@ -64,6 +64,7 @@ func pair() -> void:
 
 func run() -> void:
 	await wait(2.0)
+	check_outfit()
 	check(scene.hud.frame_select.item_count == 2 and scene.hud.frame_select.get_item_id(0) == 60 and scene.hud.frame_select.get_item_id(1) == 120, "Frame selector offers exactly 60 and 120 FPS")
 	scene.set_frame_limit(60)
 	check(Engine.max_fps == 60 and scene.hud.frame_select.selected == 0, "60 FPS selection updates the native limiter and UI")
@@ -199,6 +200,7 @@ func run() -> void:
 	Input.parse_input_event(key_event)
 	await wait(0.25)
 	check(scene.enemy.health == 100 and scene.hit_count == 0, "Skill charge cannot deal damage or fake hit confirmation")
+	check(scene.player.sword.material_overlay == scene.player.sword_glow and float(scene.player.sword_glow.get_shader_parameter("flash")) > 0.3, "Skill charge illuminates the equipped greatsword, not the hidden old blade")
 	await wait(1.1)
 	check(first_skill_contact_ms >= 425 and first_skill_contact_ms < 495, "Skill impact stays aligned to the 440 ms animation event")
 	check(scene.enemy.health == 45 and scene.hit_count == 1, "One skill release deals exactly one 55-damage hit")
@@ -327,6 +329,27 @@ func run() -> void:
 	output.close()
 	print("VERIFICATION ", JSON.stringify(stats))
 	get_tree().quit(0 if failures.is_empty() else 1)
+
+func check_outfit() -> void:
+	var original := preload("res://assets/characters/Knight.glb").instantiate()
+	var outfit := preload("res://assets/characters/Rogue.glb").instantiate()
+	var current := scene.player.get_node("Visual/Model/Rig/Skeleton3D") as Skeleton3D
+	var original_rig := original.get_node("Rig/Skeleton3D") as Skeleton3D
+	var outfit_rig := outfit.get_node("Rig/Skeleton3D") as Skeleton3D
+	var compatible := current.get_bone_count() == 41 and outfit_rig.get_bone_count() == 41
+	for bone in current.get_bone_count():
+		compatible = compatible and current.get_bone_name(bone) == outfit_rig.get_bone_name(bone) and original_rig.get_bone_rest(bone).is_equal_approx(outfit_rig.get_bone_rest(bone))
+	check(compatible, "Outfit uses the same 41-bone rig and authored rest poses without retargeting")
+	var garments_replaced := true
+	for part in ["Body", "ArmLeft", "ArmRight", "LegLeft", "LegRight"]:
+		var equipped := current.get_node("Knight_" + part) as MeshInstance3D
+		var donor := outfit_rig.get_node("Rogue_" + part) as MeshInstance3D
+		garments_replaced = garments_replaced and equipped.mesh == donor.mesh and equipped.skin == donor.skin
+	check(garments_replaced and current.get_node("chest/Knight_Cape").mesh == outfit_rig.get_node("chest/Rogue_Cape").mesh, "All five garments and the cape use the new authored models")
+	check(current.get_node("Knight_Head").mesh == original_rig.get_node("Knight_Head").mesh and current.get_node("head/Knight_Helmet").mesh == original_rig.get_node("head/Knight_Helmet").mesh, "The same knight keeps the original head and helmet")
+	check(scene.player.sword.name == &"2H_Sword" and scene.player.sword.visible and not current.get_node("handslot_r/1H_Sword").visible and scene.player.sword.get_parent() is BoneAttachment3D, "One new greatsword is visible on the original animated hand attachment")
+	original.free()
+	outfit.free()
 
 func showcase() -> void:
 	await wait(2.5)

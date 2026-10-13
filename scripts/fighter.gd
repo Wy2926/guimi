@@ -58,24 +58,45 @@ var step_distance := 0.0
 var _last_position := Vector3.ZERO
 
 func _ready() -> void:
+	if player_controlled:
+		_dress_player()
 	flash_material = ShaderMaterial.new()
 	flash_material.shader = preload("res://shaders/hit_flash.gdshader")
 	for node in visual.find_children("*", "MeshInstance3D", true, false):
 		var mesh := node as MeshInstance3D
 		meshes.append(mesh)
 		mesh.material_overlay = flash_material
-		if player_controlled and ("Shield" in mesh.name or mesh.name == "2H_Sword" or mesh.name == "1H_Sword_Offhand"):
+		if player_controlled and ("Shield" in mesh.name or mesh.name == "1H_Sword" or mesh.name == "1H_Sword_Offhand"):
 			mesh.hide()
-		if mesh.name == "1H_Sword":
+		if player_controlled and mesh.name == "2H_Sword":
 			sword = mesh
-			mesh.scale *= 0.83
-			if player_controlled:
-				sword_glow = flash_material.duplicate() as ShaderMaterial
-				sword_glow.set_shader_parameter("tint", Color("62ddff"))
-				mesh.material_overlay = sword_glow
+			mesh.show()
+			# Keep the broader blade inside the existing melee reach and grounded at rest.
+			mesh.scale *= 0.70
+			sword_glow = flash_material.duplicate() as ShaderMaterial
+			sword_glow.set_shader_parameter("tint", Color("62ddff"))
+			mesh.material_overlay = sword_glow
 	_setup_animations()
 	_last_position = position
 	reset_fighter()
+
+func _dress_player() -> void:
+	# One fixed outfit, not an equipment system. Both KayKit rigs share all 41 binds.
+	# Reuse the authored garment meshes/skins; keep this knight's head and animations.
+	var outfit := preload("res://assets/characters/Rogue.glb").instantiate()
+	var skeleton := $Visual/Model/Rig/Skeleton3D
+	var garment_skeleton := outfit.get_node("Rig/Skeleton3D")
+	for part in ["Body", "ArmLeft", "ArmRight", "LegLeft", "LegRight"]:
+		var current := skeleton.get_node("Knight_" + part) as MeshInstance3D
+		var garment := garment_skeleton.get_node("Rogue_" + part) as MeshInstance3D
+		current.mesh = garment.mesh
+		current.skin = garment.skin
+		current.transform = garment.transform
+	var cape := skeleton.get_node("chest/Knight_Cape") as MeshInstance3D
+	var garment_cape := garment_skeleton.get_node("chest/Rogue_Cape") as MeshInstance3D
+	cape.mesh = garment_cape.mesh
+	cape.transform = garment_cape.transform
+	outfit.free()
 
 func _setup_animations() -> void:
 	var library := AnimationLibrary.new()
