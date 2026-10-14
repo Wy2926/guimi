@@ -119,9 +119,9 @@ func _cast(targets: Array[Node3D]) -> void:
 func contact(target: Node3D, orb: Node3D) -> void:
 	if not is_instance_valid(player) or player.dead or not player.enabled or not is_instance_valid(target) or target.dead or not orbs.has(orb):
 		return
-	# No ghost multiplier and no swing event: auxiliary hits never roll other passives.
+	# No divinity multiplier or swing event: fate reactions use the shared hit path.
 	# Gravity is continuous movement control, not repeated knockback/stagger on each hit.
-	var result := player.deal_damage(target, orb.kind, orb.coefficient, orb.element, false, false, "雷缚珠", orb.direction, false)
+	var result := player.deal_fabao_damage(target, SKILL_ID, orb.coefficient, false, false, orb.direction, false)
 	if float(result.get("actual", 0.0)) > 0.0:
 		hit_count += 1
 		if is_instance_valid(orb):

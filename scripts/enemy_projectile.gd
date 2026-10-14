@@ -7,15 +7,17 @@ var source_stats: BattleStats
 var direction := Vector3.FORWARD
 var speed := 6.0
 var coefficient := 1.0
+var element := DamageRules.Element.NONE
 var _life := 4.0
 var _spent := false
 
-func configure(attacker: BattleStats, player: Node3D, heading: Vector3, travel_speed: float, multiplier: float) -> void:
+func configure(attacker: BattleStats, player: Node3D, heading: Vector3, travel_speed: float, multiplier: float, attack_element: int = DamageRules.Element.NONE) -> void:
 	source_stats = attacker
 	target = player
 	direction = heading.normalized()
 	speed = travel_speed
 	coefficient = multiplier
+	element = attack_element
 
 func _ready() -> void:
 	collision_layer = 0
@@ -56,7 +58,7 @@ func _on_body_entered(body: Node3D) -> void:
 		return
 	_spent = true
 	set_deferred("monitoring", false)
-	var result := DamageRules.calculate(source_stats, target.stats, 1, coefficient)
+	var result := DamageRules.calculate(source_stats, target.stats, 1, coefficient, element)
 	target.receive_damage(result, direction)
 	hide()
 	queue_free()

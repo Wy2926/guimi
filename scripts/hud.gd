@@ -41,6 +41,7 @@ var _boss_health: ProgressBar
 var _boss_text: Label
 var _skill_row: HBoxContainer
 var _skill_widgets: Dictionary = {}
+var _build_summary: Label
 var _notice_label: Label
 var _hint: Label
 var _shake: CheckButton
@@ -136,15 +137,15 @@ func _refresh() -> void:
 		_time_label.text = "%s / %s" % [_clock(arena.director.elapsed), _clock(arena.director.duration)]
 		_phase.text = str(arena.director.phase_name)
 		_counts.text = "击杀 %d  ·  场上 %d" % [arena.defeat_count, arena.director.get_alive_count()]
-	_update_skill("ring", float(player.skill_cooldown), false, 0.0)
-	_update_skill("ghost", float(player.ghost_cooldown), bool(player.ghost_active), float(player.ghost_left))
+	_update_divinity()
 	_update_skill("swords", 0.0, false, 0.0)
-	_update_skill("meteor", 0.0, false, 0.0)
+	_update_skill("meteor", float(arena.storm.meteor_cooldown), false, 0.0)
 	var orb_cooldown: float = float(arena.orbs.cooldown_left) if is_instance_valid(arena.orbs) else 0.0
 	_update_skill("thunder_orb", orb_cooldown, false, 0.0)
 	var aura_cooldown: float = float(arena.aura.cooldown_left) if is_instance_valid(arena.aura) else 0.0
 	_update_skill("taiji_aura", aura_cooldown, false, 0.0)
 	_update_skill("huntian_ling", float(arena.storm.ribbon_cooldown), not arena.storm.ribbon.is_empty(), 0.0)
+	_build_summary.text = "天命：%s  ·  进化：%s" % [_owned_titles(progression.fate_definitions, progression.fates), _owned_titles(progression.evolution_definitions, progression.evolutions)]
 	var boss = arena.boss
 	_boss_panel.visible = is_instance_valid(boss) and not boss.dead
 	if _boss_panel.visible:
@@ -158,31 +159,60 @@ func _refresh() -> void:
 		_update_choice_heading()
 
 
-func _update_skill(id: String, cooldown: float, active: bool, remaining: float) -> void:
+func _update_divinity() -> void:
+	var definition: SkillDefinition = arena.progression.divinity
+	var widgets: Dictionary = _skill_widgets["divinity"]
+	if definition == null:
+		widgets.title.text = "未选人物神通"
+		widgets.status.text = ""
+		widgets.bar.value = 0.0
+		return
+	widgets.title.text = definition.title.get_slice("·", 1)
+	widgets.title.tooltip_text = definition.title + "\n" + definition.description
+	widgets.binding.text = "常驻被动"
+	widgets.status.text = "飞剑+1 · 绫链+1"
+	widgets.status.tooltip_text = "仅强化已领悟的诛仙剑阵与混天绫，不解锁法宝或改变近战。"
+	var active: bool = definition.id == "nezha"
+	widgets.status.add_theme_color_override("font_color", GOLD if active else MUTED)
+	widgets.bar.value = 1.0 if active else 0.0
+
+
+func _owned_titles(definitions: Array[SkillDefinition], owned: Dictionary) -> String:
+	var titles := PackedStringArray()
+	for definition: SkillDefinition in definitions:
+		if int(owned.get(definition.id, 0)) > 0:
+			titles.append(definition.title)
+	return "、".join(titles) if not titles.is_empty() else "未领悟"
+
+
+func _update_skill(id: String, cooldown: float, active: bool, _remaining: float) -> void:
 	var widgets: Dictionary = _skill_widgets[id]
 	var level: int = arena.progression.skill_level(id)
 	var definition = arena.progression.skill(id)
+	var count: int = arena.progression.artifact_count(id)
 	var title: Label = widgets.title
 	var status: Label = widgets.status
 	var bar: ProgressBar = widgets.bar
-	var title_text: String = definition.title.get_slice("·", 1) if id in ["taiji_aura", "meteor", "huntian_ling"] else definition.title
+	var title_text: String = definition.title.get_slice("·", 1)
 	title.text = "%s  Lv.%d" % [title_text, level]
 	title.tooltip_text = definition.title + "\n" + definition.description
+	widgets.binding.text = arena.progression.signature(definition)
+	widgets.binding.tooltip_text = "法宝固有属性与异常，不继承人物附魔。"
 	title.add_theme_color_override("font_color", INK if level > 0 else MUTED)
 	if level <= 0:
 		status.text = "升级时可领悟"
 		status.add_theme_color_override("font_color", MUTED)
 		bar.value = 0.0
 	elif id == "swords":
-		status.text = "%d 柄 · 自动穿插" % definition.count_at(level)
+		status.text = "%d 柄 · 束缚贯阵" % count if arena.progression.has_evolution("swords_pierce") else "%d 柄 · 绕行突刺" % count
 		status.add_theme_color_override("font_color", TEAL)
 		bar.value = 1.0
 	elif id == "meteor":
-		status.text = "出招祭印 · 落地崩裂"
-		status.add_theme_color_override("font_color", TEAL)
-		bar.value = 1.0
+		status.text = "祭印就绪" if cooldown <= 0.0 else "祭印 · %.1f秒" % cooldown
+		status.add_theme_color_override("font_color", TEAL if cooldown <= 0.0 else MUTED)
+		bar.value = clampf(1.0 - cooldown / maxf(0.1, float(definition.cooldown) * float(arena.player.stats.cooldown_multiplier)), 0.0, 1.0)
 	elif id == "thunder_orb":
-		status.text = "%d 颗 · 自动索敌" % definition.count_at(level) if cooldown <= 0.0 else "%d 颗 · %.1f 秒后投射" % [definition.count_at(level), cooldown]
+		status.text = "%d 颗 · 自动索敌" % count if cooldown <= 0.0 else "%d 颗 · %.1f 秒后投射" % [count, cooldown]
 		status.add_theme_color_override("font_color", TEAL if cooldown <= 0.0 else MUTED)
 		bar.value = clampf(1.0 - cooldown / maxf(0.1, float(definition.cooldown) * float(arena.player.stats.cooldown_multiplier)), 0.0, 1.0)
 	elif id == "taiji_aura":
@@ -190,29 +220,27 @@ func _update_skill(id: String, cooldown: float, active: bool, remaining: float) 
 		status.add_theme_color_override("font_color", TEAL)
 		bar.value = clampf(1.0 - cooldown / maxf(0.1, float(definition.cooldown) * float(arena.player.stats.cooldown_multiplier)), 0.0, 1.0)
 	elif id == "huntian_ling":
-		status.text = "%d 连锁 · 穿梭中" % definition.count_at(level) if active else ("%d 连锁 · 就绪" % definition.count_at(level) if cooldown <= 0.0 else "连锁 · %.1f 秒" % cooldown)
+		if active:
+			var round_count: int = int(arena.storm.ribbon.remaining) + arena.storm.ribbon.visited.size()
+			status.text = "本轮%d · 下轮%d" % [round_count, count] if round_count != count else "%d 连锁 · 穿梭中" % round_count
+		else:
+			status.text = "%d 连锁 · 就绪" % count if cooldown <= 0.0 else "%d 连锁 · %.1f 秒" % [count, cooldown]
+		status.mouse_filter = Control.MOUSE_FILTER_PASS
+		status.tooltip_text = "本轮连锁容量在施放时确定；升级后的数量从下一轮生效。" if active else ""
 		status.add_theme_color_override("font_color", GOLD if active else TEAL)
-		bar.value = clampf(1.0 - cooldown / maxf(0.1, float(definition.cooldown) * float(arena.player.stats.cooldown_multiplier)), 0.0, 1.0)
-	elif active:
-		status.text = "解放中  %.1f 秒" % remaining
-		status.add_theme_color_override("font_color", GOLD)
-		bar.value = clampf(remaining / maxf(0.1, definition.duration_at(level)), 0.0, 1.0)
-	else:
-		status.text = "就绪" if cooldown <= 0.0 else "冷却  %.1f 秒" % cooldown
-		status.add_theme_color_override("font_color", TEAL if cooldown <= 0.0 else MUTED)
 		bar.value = clampf(1.0 - cooldown / maxf(0.1, float(definition.cooldown) * float(arena.player.stats.cooldown_multiplier)), 0.0, 1.0)
 
 
 func _update_stats(stats: Resource) -> void:
-	var element_names := ["无属性", "火", "冰", "光", "暗"]
-	_stat_text.text = "物理攻击    %.0f\n魔法攻击    %.0f\n独立攻击    %.0f\n暴击率    %.0f%%    暴伤    %.0f%%\n闪避率    %.0f%%    吸血    %.1f%%\n移动速度    %.1f\n物理防御    %.0f    魔法防御    %.0f\n当前属性    %s\n火 / 冰 / 光 / 暗强化\n%.0f%% / %.0f%% / %.0f%% / %.0f%%" % [
+	_stat_text.text = "物理攻击    %.0f\n魔法攻击    %.0f\n独立攻击    %.0f\n暴击率    %.0f%%    暴伤    %.0f%%\n闪避率    %.0f%%    吸血    %.1f%%\n移动速度    %.1f\n物理防御    %.0f    魔法防御    %.0f\n火 / 冰 / 光 / 暗抗性\n%.0f%% / %.0f%% / %.0f%% / %.0f%%\n攻击属性与异常由法宝自带。\n天命：%s\n进化：%s" % [
 		stats.physical_attack, stats.magic_attack, stats.independent_attack,
 		stats.crit_chance * 100.0, stats.crit_multiplier * 100.0,
 		stats.dodge_chance * 100.0, stats.life_steal * 100.0, stats.move_speed,
 		stats.physical_defense, stats.magic_defense,
-		element_names[clampi(int(stats.element), 0, 4)],
-		stats.element_bonus[0] * 100.0, stats.element_bonus[1] * 100.0,
-		stats.element_bonus[2] * 100.0, stats.element_bonus[3] * 100.0,
+		stats.resistances[0] * 100.0, stats.resistances[1] * 100.0,
+		stats.resistances[2] * 100.0, stats.resistances[3] * 100.0,
+		_owned_titles(arena.progression.fate_definitions, arena.progression.fates),
+		_owned_titles(arena.progression.evolution_definitions, arena.progression.evolutions),
 	]
 
 
@@ -245,7 +273,7 @@ func show_choices(options: Array[Dictionary]) -> void:
 		var option: Dictionary = options[i]
 		var labels: Dictionary = _choice_labels[i]
 		var category := str(option.get("category", "stat"))
-		var category_title := "技能领悟" if category == "skill" else ("属性剑意" if category == "element" else "基础修行")
+		var category_title: String = {"skill": "法宝领悟", "fate": "天命词条", "evolution": "终极进化"}.get(category, "基础修行")
 		labels.category.text = "%02d  /  %s" % [i + 1, category_title]
 		labels.category.add_theme_color_override("font_color", TEAL if category == "skill" else GOLD)
 		labels.title.text = str(option.get("title", "成长"))
@@ -261,7 +289,7 @@ func show_choices(options: Array[Dictionary]) -> void:
 
 func _update_choice_heading() -> void:
 	_choice_title.text = "破境 · 三选一"
-	_choice_subtitle.text = "Lv.%d  选择一项成长，继续你的剑道" % int(arena.progression.level)
+	_choice_subtitle.text = "Lv.%d  选择本局成长，组合你的神通与法宝" % int(arena.progression.level)
 	if int(arena.progression.pending_levels) > 1:
 		_choice_subtitle.text += "  ·  尚有 %d 次选择" % int(arena.progression.pending_levels)
 
@@ -326,9 +354,7 @@ func _draw() -> void:
 			continue
 		var alpha := 1.0 - smoothstep(0.32, POPUP_LIFETIME, float(item.age))
 		var color := GOLD if item.lethal else (TEAL if item.heavy else INK)
-		if item.source == "厉鬼":
-			color = Color("ec9ab0")
-		elif item.source in ["受伤", "敌人"]:
+		if item.source in ["受伤", "敌人"]:
 			color = RED
 		color.a = alpha
 		var font_size := 25 if item.lethal else (23 if item.heavy else 19)
@@ -360,7 +386,7 @@ func _build_gameplay() -> void:
 	var title_row := HBoxContainer.new()
 	title_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	vitals_column.add_child(title_row)
-	_label(title_row, "剑 豪", 21, GOLD).size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_label(title_row, "哪 吒", 21, GOLD).size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_level = _label(title_row, "Lv.01", 17, INK)
 	_health = _bar(vitals_column, RED, 8)
 	_health_text = _label(vitals_column, "100 / 100", 12, MUTED)
@@ -403,13 +429,14 @@ func _build_gameplay() -> void:
 	_skill_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_skill_row.add_theme_constant_override("separation", 8)
 	skill_center.add_child(_skill_row)
-	_make_skill("ring", "裂环斩", "K / 右键 / RB")
-	_make_skill("ghost", "厉鬼", "G / B")
-	_make_skill("swords", "万剑归宗", "被动")
-	_make_skill("meteor", "照天印", "罗宣 · 被动火法")
-	_make_skill("thunder_orb", "雷缚珠", "被动 · 暗魔法")
-	_make_skill("taiji_aura", "太极图", "太上老君 · 被动阵法")
-	_make_skill("huntian_ling", "混天绫", "哪吒 · 被动连锁")
+	_make_skill("divinity", "三头八臂", "常驻被动")
+	_make_skill("swords", "诛仙剑阵", "无属性 · 出血")
+	_make_skill("huntian_ling", "混天绫", "无属性 · 束缚")
+	_make_skill("meteor", "照天印", "火 · 灼烧")
+	_make_skill("thunder_orb", "定海珠", "暗 · 诅咒")
+	_make_skill("taiji_aura", "太极图", "光 · 感电")
+	_build_summary = _label(column, "", 12, GOLD, HORIZONTAL_ALIGNMENT_CENTER)
+	_build_summary.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_hint = _label(column, "WASD / 左摇杆移动  ·  自动攻击  ·  击杀拾取经验，升级选择成长", 12, MUTED, HORIZONTAL_ALIGNMENT_CENTER)
 
 
@@ -425,7 +452,7 @@ func _make_skill(id: String, title: String, key: String) -> void:
 	for label in [key_label, title_label, status]:
 		label.clip_text = true
 		label.text_overrun_behavior = TextServer.OVERRUN_TRIM_ELLIPSIS
-	var bar := _bar(column, TEAL if id != "ghost" else GOLD, 3)
+	var bar := _bar(column, GOLD if id == "divinity" else TEAL, 3)
 	_skill_widgets[id] = {"title": title_label, "status": status, "bar": bar, "binding": key_label}
 
 
@@ -434,7 +461,7 @@ func _build_pause() -> void:
 	pause_panel = modal.overlay
 	var column: VBoxContainer = modal.column
 	_label(column, "片刻休整", 29, INK)
-	_label(column, "剑豪 · 本局修行", 13, GOLD)
+	_label(column, "哪吒 · 本局修行", 13, GOLD)
 	var row := HBoxContainer.new()
 	row.add_theme_constant_override("separation", 28)
 	column.add_child(row)
@@ -466,6 +493,7 @@ func _build_pause() -> void:
 	attributes.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_label(attributes, "当前属性", 16, GOLD)
 	_stat_text = _label(attributes, "", 14, INK)
+	_stat_text.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_stat_text.add_theme_constant_override("line_spacing", 5)
 	pause_panel.hide()
 
@@ -510,7 +538,7 @@ func _build_result() -> void:
 	var modal := _modal("RunResult", 480)
 	result_panel = modal.overlay
 	var column: VBoxContainer = modal.column
-	_label(column, "烬 庭  /  剑 豪", 13, GOLD, HORIZONTAL_ALIGNMENT_CENTER)
+	_label(column, "烬 庭  /  哪 吒", 13, GOLD, HORIZONTAL_ALIGNMENT_CENTER)
 	_result_title = _label(column, "破阵而归", 38, GOLD, HORIZONTAL_ALIGNMENT_CENTER)
 	_result_description = _label(column, "", 15, MUTED, HORIZONTAL_ALIGNMENT_CENTER)
 	_result_summary = _label(column, "", 19, INK, HORIZONTAL_ALIGNMENT_CENTER)
@@ -557,7 +585,7 @@ func _fit_layout() -> void:
 		widgets.binding.add_theme_font_size_override("font_size", 10 if size.x < 1100.0 else 11)
 	_choice_box.custom_minimum_size.x = minf(1020.0, maxf(0.0, size.x - 56.0))
 	for button in _choice_buttons:
-		button.custom_minimum_size.y = 280.0 if size.y >= 680.0 else 260.0
+		button.custom_minimum_size.y = 360.0 if size.y >= 680.0 else 330.0
 	for labels in _choice_labels:
 		labels.title.add_theme_font_size_override("font_size", 22 if size.y >= 680.0 else 20)
 		labels.description.add_theme_font_size_override("font_size", 15 if size.y >= 680.0 else 14)

@@ -6,10 +6,14 @@
 script = ExtResource("1")
 id = "meteor"
 title = "罗宣·照天印"
-description = "近战出招有28%概率祭起火印，预警后镇落，印体投影崩裂为余烬；造成火属性范围魔法伤害，碎片不重复结算。"
+description = "自动祭起火印，预警后镇落，造成火属性范围魔法伤害并施加灼烧；火可碎冰，混天绫可沿路径传火。领悟火印应劫后，直接命中暴击也能祭印。"
+system = "artifact"
 category = "passive"
 kind = 1
 coefficient = 1.28
 coefficient_growth = 0.2
 element = 1
+status = "burn"
+status_duration = 4.0
+cooldown = 5.0
 max_level = 5

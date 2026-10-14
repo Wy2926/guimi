@@ -75,9 +75,8 @@ func _ready() -> void:
 	progression.choice_requested.connect(_on_choices)
 	player.swing_started.connect(_on_windup)
 	player.swing_active.connect(_on_swing)
-	player.skill_released.connect(func() -> void: feedback.skill_release(player))
+	player.fabao_requested.connect(_on_fabao_requested)
 	player.hit_confirmed.connect(_on_hit)
-	player.ghost_changed.connect(_on_ghost_changed)
 	player.defeated.connect(func() -> void: _finish(false))
 	player.hurt.connect(_on_hurt)
 	player.stepped.connect(func(point: Vector3) -> void: feedback.sound("step%d" % (randi() % 3), point, -19, 1.1))
@@ -101,14 +100,6 @@ func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_F11:
 		var full := DisplayServer.window_get_mode() == DisplayServer.WINDOW_MODE_FULLSCREEN
 		DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED if full else DisplayServer.WINDOW_MODE_FULLSCREEN)
-		get_viewport().set_input_as_handled()
-	if state != "playing" or event.is_echo():
-		return
-	if event.is_action_pressed("skill"):
-		player.request_skill()
-		get_viewport().set_input_as_handled()
-	elif event.is_action_pressed("ghost_state"):
-		player.request_ghost()
 		get_viewport().set_input_as_handled()
 
 func _process(delta: float) -> void:
@@ -188,25 +179,19 @@ func _collect_experience(amount: int) -> void:
 	if state in ["playing", "choosing"]:
 		progression.add_experience(amount)
 
-func _on_windup(heavy: bool) -> void:
+func _on_windup(_heavy: bool) -> void:
 	feedback.sound("cloth", player.global_position, -19.0, 1.0)
-	if heavy:
-		feedback.skill_charge(player)
 
-func _on_swing(heavy: bool) -> void:
+func _on_swing(_heavy: bool) -> void:
 	if state != "playing":
 		return
-	if heavy:
-		feedback.skill_spin(player)
-	else:
-		feedback.slash(player, player.current_move.style, player.ghost_active, player.strike_index, player.combo_finisher)
-	if player.strike_index == 0:
-		storm.on_swing(heavy)
+	feedback.slash(player, player.current_move.style, false, player.strike_index, player.combo_finisher)
 
-func _on_ghost_changed(active: bool) -> void:
-	feedback.ghost_transition(player, active)
-	hud.notice = "厉鬼临身 · 五式八击" if active else "鬼气收敛 · 三式连斩"
-	hud.notice_left = 2.0
+func _on_fabao_requested(skill_id: String, target: Node3D) -> void:
+	if state == "playing" and skill_id == "meteor":
+		# All callbacks use the existing executor; secondary fate casts cannot
+		# request another fate cast or change the normal artifact cooldown.
+		storm.request_fate_cast(target, true)
 
 func _on_hit(target: Node3D, point: Vector3, result: Dictionary, heavy: bool, source: String) -> void:
 	hit_count += 1
@@ -219,8 +204,8 @@ func _on_hit(target: Node3D, point: Vector3, result: Dictionary, heavy: bool, so
 	_impact_left = 0.07
 	var direction := (target.global_position - player.global_position).normalized()
 	# Sword contact owns its directional flash; only camera/haptics share this budget.
-	if source not in ["飞剑", "照天印", "雷缚珠", "太极图", "混天绫"]:
-		feedback.impact(point, direction, lethal, heavy, player.ghost_active, player.combo_finisher)
+	if not result.get("secondary", false) and source not in ["诛仙剑阵", "照天印", "定海珠", "太极图", "混天绫"]:
+		feedback.impact(point, direction, lethal, heavy, false, player.combo_finisher)
 	shake_time = 0.16
 	shake_power = 0.055 if heavy else 0.025
 	var pads := Input.get_connected_joypads()
@@ -293,7 +278,7 @@ func restart() -> void:
 	player.enabled = true
 	ready_to_play = true
 	state = "playing"
-	hud.notice = "剑豪 · 靠近敌人自动出剑，拾取经验破境"
+	hud.notice = "哪吒·三头八臂 · 飞剑 +1，混天绫连锁 +1"
 	hud.notice_left = 5.0
 
 func _warm_start() -> void:
@@ -312,5 +297,5 @@ func _warm_start() -> void:
 	director.reset()
 	ready_to_play = true
 	state = "playing"
-	hud.notice = "剑豪 · 靠近敌人自动出剑，拾取经验破境"
+	hud.notice = "哪吒·三头八臂 · 飞剑 +1，混天绫连锁 +1"
 	hud.notice_left = 5.0

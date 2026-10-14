@@ -26,8 +26,6 @@ var life_left := 4.0
 var age := 0.0
 var arena_radius := 15.8
 var coefficient := 0.6
-var kind := DamageRules.Kind.MAGICAL
-var element := DamageRules.Element.DARK
 var phase := Phase.FLIGHT
 var current_radius := FLIGHT_RADIUS
 
@@ -57,8 +55,6 @@ func configure(source: Node3D, heading: Vector3, definition: SkillDefinition, le
 	_well_duration = definition.duration_at(level)
 	life_left = 4.0
 	coefficient = definition.coefficient_at(level)
-	kind = definition.kind
-	element = definition.element
 	arena_radius = boundary
 
 func _ready() -> void:

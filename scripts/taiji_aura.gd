@@ -5,7 +5,6 @@ const MODEL = preload("res://assets/effects/taiji_aura/taiji_aura.glb")
 const RING_SHADER = preload("res://shaders/astral_ring.gdshader")
 const ENERGY_SHADER = preload("res://assets/weapons/astral_edge/energy.gdshader")
 const SKILL_ID := "taiji_aura"
-const HIT_SOURCE := "太极图"
 const PULSE_TIME := 0.42
 const JADE := Color("59ddcc")
 const GOLD := Color("f6d395")
@@ -126,7 +125,7 @@ func _pulse() -> void:
 		# A body merely touching the cylinder must not be hit beyond the visible edge.
 		if offset.length_squared() > radius * radius:
 			continue
-		var result := player.deal_damage(target, definition.kind, definition.coefficient_at(_level), definition.element, false, false, HIT_SOURCE, offset, false)
+		var result := player.deal_fabao_damage(target, SKILL_ID, definition.coefficient_at(_level), false, false, offset, false)
 		if float(result.get("actual", 0.0)) > 0.0:
 			hit_count += 1
 		# A lethal boss hit can finish and pause the run inside deal_damage.

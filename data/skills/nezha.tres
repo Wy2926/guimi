@@ -1,0 +1,14 @@
+[gd_resource type="Resource" script_class="SkillDefinition" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/skill_definition.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = "nezha"
+title = "哪吒·三头八臂"
+description = "多臂驭宝：常驻强化已领悟的法宝，诛仙剑阵额外增加1柄飞剑，混天绫每轮多连锁1个目标；不解锁未获得的法宝，不改变人物模型、近战连招或范围。"
+system = "divinity"
+category = "passive"
+coefficient = 0.0
+coefficient_growth = 0.0
+max_level = 1

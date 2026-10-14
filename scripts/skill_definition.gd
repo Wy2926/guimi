@@ -1,21 +1,23 @@
 class_name SkillDefinition
 extends Resource
-## Authored skill data, not an executable skill graph.
+## Authored divinity, artifact, fate, and evolution data; never an executable graph.
 
 @export var id: String = ""
 @export var title: String = ""
 @export_multiline var description: String = ""
-@export_enum("basic", "active", "passive") var category: String = "basic"
+@export_enum("divinity", "artifact", "fate", "evolution") var system: String = "artifact"
+@export_enum("active", "passive") var category: String = "passive"
 @export_enum("物理", "魔法", "固定") var kind: int = 0
 @export var coefficient: float = 1.0
 @export var coefficient_growth: float = 0.2
-@export_enum("继承:-1", "无属性:0", "火:1", "冰:2", "光:3", "暗:4") var element: int = -1
+@export_enum("无属性:0", "火:1", "冰:2", "光:3", "暗:4") var element: int = 0
+@export var status: String = ""
+@export var status_duration: float = 0.0
+@export var prerequisites: Dictionary = {}
 @export var cooldown: float = 0.0
 @export_range(1, 10) var max_level: int = 5
 @export var duration: float = 0.0
 @export var duration_growth: float = 0.0
-@export var damage_multiplier: float = 1.0
-@export var attack_speed_multiplier: float = 1.0
 @export var counts: Array[int] = []
 @export var radius: float = 0.0
 @export var radius_growth: float = 0.0

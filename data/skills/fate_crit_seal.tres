@@ -1,0 +1,14 @@
+[gd_resource type="Resource" script_class="SkillDefinition" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/skill_definition.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = "crit_seal"
+title = "罗宣·火印应劫"
+description = "非火印直接命中暴击时，向8.5米内存活目标请求已拥有的照天印，触发间隔1.5秒、距离受范围加成；次生火印不附灼烧、不再触发火印应劫。"
+system = "fate"
+coefficient = 0.0
+coefficient_growth = 0.0
+max_level = 1
+prerequisites = {"meteor": 1}

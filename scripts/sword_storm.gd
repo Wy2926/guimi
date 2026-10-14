@@ -4,13 +4,15 @@ extends Node3D
 const RANGE := 8.5
 const SWORD_SCENE := preload("res://assets/weapons/astral_edge/astral_edge.tscn")
 const SWORD_VISUAL := preload("res://assets/weapons/astral_edge/astral_edge.gd")
-const MAX_ACTIVE_SWORDS := 6
+# Six authored rank-five blades plus Nezha's one additional controlled blade.
+const MAX_ACTIVE_SWORDS := 7
 # Keep the authored model; its in-game length is now ~2.31 units instead of 3.55.
 const BLADE_SCALE := 0.65
 const BLADE_CONTACT := Vector3(0, 2.6, 0)
 const APPROACH_SPEED := 9.0
 const STRIKE_SPEED := 48.0
 const STRIKE_HOLD := 0.085
+const PIERCE_MIN_TIME := 0.16
 const ORBIT_RADIUS := 1.65
 const ORBIT_HEIGHT := 1.25
 const ORBIT_SPEED := 0.55
@@ -32,10 +34,10 @@ var active_swords: int:
 var volley_count := 0
 var chain_count := 0
 var meteor_count := 0
-var meteor_rolls := 0
+var meteor_cooldown := 0.0
 var sword_hits := 0
 var meteor_hits := 0
-var meteor_chance := 0.28
+var evolved_strikes := 0
 var rng := RandomNumberGenerator.new()
 var flights: Array[Dictionary] = []
 var meteors: Array[Dictionary] = []
@@ -70,7 +72,7 @@ func refresh_skills() -> void:
 	var level := progression.skill_level("swords")
 	if not player.enabled or player.dead or level <= 0:
 		return
-	var count := clampi(progression.skill("swords").count_at(level), 0, MAX_ACTIVE_SWORDS)
+	var count := clampi(progression.artifact_count("swords"), 0, MAX_ACTIVE_SWORDS)
 	if not is_instance_valid(halo):
 		_make_halo()
 		feedback.storm_activate(player.global_position)
@@ -127,24 +129,17 @@ func reset() -> void:
 	volley_count = 0
 	chain_count = 0
 	meteor_count = 0
-	meteor_rolls = 0
+	meteor_cooldown = 0.0
 	sword_hits = 0
 	meteor_hits = 0
+	evolved_strikes = 0
 	target_cursor = 0
 	blade_cursor = 0
 	refresh_skills()
 
-func on_swing(_heavy: bool) -> void:
-	# Only meteor is swing-triggered. Swords acquire targets in their own physics tick.
-	if not active or not player.enabled or player.dead or progression.skill_level("meteor") <= 0:
-		return
-	var targets := _targets()
-	if targets.is_empty():
-		return
-	# Only the authored player's swing rolls this once. Auxiliary hits never call it.
-	meteor_rolls += 1
-	if rng.randf() < meteor_chance and meteors.size() < 2:
-		_call_meteor(targets[rng.randi_range(0, targets.size() - 1)])
+func request_fate_cast(target: Node3D, secondary := true) -> bool:
+	# Reuse the same warning, flight and impact; bonus casts do not reset auto-CD.
+	return _call_meteor(target, secondary)
 
 func _targets(target_range := -1.0) -> Array[Node3D]:
 	var targets: Array[Node3D] = []
@@ -170,10 +165,15 @@ func _physics_process(delta: float) -> void:
 			reset()
 		return
 	volley_left = maxf(0.0, volley_left - delta)
+	meteor_cooldown = maxf(0.0, meteor_cooldown - delta)
 	if progression.skill_level("swords") > 0 and volley_left <= 0.0:
 		# Bound idle target scans too; no attack animation or swing grace is required.
 		volley_left = VOLLEY_INTERVAL
 		_fire_volley(_targets())
+	if progression.skill_level("meteor") > 0 and meteor_cooldown <= 0.0 and meteors.size() < 2:
+		var targets := _targets()
+		if not targets.is_empty() and _call_meteor(targets[0]):
+			meteor_cooldown = progression.skill("meteor").cooldown * player.stats.cooldown_multiplier
 	_advance_swords()
 	_advance_meteors(delta)
 	_advance_ribbon(delta)
@@ -214,12 +214,13 @@ func _launch_ribbon(target: Node3D) -> void:
 	follow.add_child(visual)
 	var origin := player.global_position + Vector3.UP * 1.0
 	visual.begin(origin)
-	# Rank/range are cast snapshots, matching existing projectile semantics.
+	# Rank/range and divinity's extra contact are cast snapshots, matching the
+	# existing projectile semantics. One cloth visits one more distinct target.
 	ribbon = {"path": path, "follow": follow, "visual": visual, "tween": null,
-		"visited": [], "remaining": definition.count_at(level), "coefficient": definition.coefficient_at(level),
+		"visited": [], "remaining": progression.artifact_count("huntian_ling"), "coefficient": definition.coefficient_at(level),
 		"range": definition.radius_at(level) * player.stats.range_multiplier,
 		"jump_range": RIBBON_JUMP_RANGE * player.stats.range_multiplier,
-		"kind": definition.kind, "element": definition.element, "direction": player.facing,
+		"burn_snapshot": {}, "direction": player.facing,
 		"origin": origin, "leg_range": definition.radius_at(level) * player.stats.range_multiplier,
 		"phase": "flight", "left": 0.0, "contact": false}
 	ribbon_casts += 1
@@ -321,6 +322,10 @@ func _advance_ribbon(delta: float) -> void:
 			if target != null:
 				_launch_ribbon(target)
 		return
+	if not ribbon.burn_snapshot.is_empty():
+		# Carry the first primary burn along this actual path, never refresh its
+		# remaining lifetime while the cloth travels or pick up a propagated burn.
+		ribbon.burn_snapshot.remaining = maxf(0.0, float(ribbon.burn_snapshot.remaining) - delta)
 	if ribbon.phase == "fade":
 		ribbon.left -= delta
 		if ribbon.left <= 0.0:
@@ -382,9 +387,16 @@ func _ribbon_contact(target: Node3D) -> void:
 	for contact in get_world_3d().direct_space_state.intersect_shape(sword_query, 128):
 		if contact.collider != target:
 			continue
-		var hit := player.deal_damage(target, ribbon.kind, ribbon.coefficient, ribbon.element, false, false, "混天绫", ribbon.direction)
+		var burn: Dictionary = target.get_status("burn") if ribbon.burn_snapshot.is_empty() else {}
+		var hit := player.deal_fabao_damage(target, "huntian_ling", ribbon.coefficient, false, false, ribbon.direction)
 		if float(hit.get("actual", 0.0)) > 0.0:
 			ribbon_hits += 1
+			if not ribbon.burn_snapshot.is_empty() and float(ribbon.burn_snapshot.remaining) > 0.0:
+				var source := (ribbon.burn_snapshot.source as WeakRef).get_ref() as DuelFighter
+				if is_instance_valid(source):
+					target.apply_status("burn", source, ribbon.burn_snapshot.skill_id, ribbon.burn_snapshot.remaining, ribbon.burn_snapshot.potency, true)
+			elif ribbon.burn_snapshot.is_empty() and not burn.is_empty() and not bool(burn.get("secondary", false)):
+				ribbon.burn_snapshot = burn.duplicate()
 			ribbon.visual.hit()
 			feedback.ribbon_impact(point, ribbon.direction, ribbon.path)
 		break
@@ -412,9 +424,16 @@ func _fire_volley(targets: Array[Node3D]) -> void:
 func _next_target(targets: Array[Node3D], previous: Node3D = null) -> Node3D:
 	if targets.is_empty():
 		return null
+	var eligible: Array[Node3D] = []
+	if progression.has_evolution("swords_pierce"):
+		for target in targets:
+			if is_instance_valid(target) and not target.dead and target.is_visible_in_tree() and target.has_status("bind"):
+				eligible.append(target)
+	if eligible.is_empty():
+		eligible = targets
 	var fallback: Node3D
-	for i in targets.size():
-		var candidate := targets[target_cursor % targets.size()]
+	for i in eligible.size():
+		var candidate := eligible[target_cursor % eligible.size()]
 		target_cursor += 1
 		if not is_instance_valid(candidate) or candidate.dead or not candidate.is_visible_in_tree():
 			continue
@@ -433,18 +452,35 @@ func _launch_sword(target: Node3D, slot: int) -> void:
 	var blade := blades[slot]
 	var start := blade.global_position
 	blade.reparent(follow)
-	var flight := {"path": path, "follow": follow, "target": weakref(target), "hit_ids": [], "duration": 0.0, "blade": blade, "tween": null, "through": Vector3.UP, "slot": slot, "phase": FlightPhase.APPROACH, "leg": 0, "previous_contact": start}
+	var flight := {"path": path, "follow": follow, "target": weakref(target), "hit_ids": [], "duration": 0.0, "blade": blade, "tween": null, "through": Vector3.UP, "slot": slot, "phase": FlightPhase.APPROACH, "leg": 0, "previous_contact": start, "coefficient": progression.coefficient("swords"), "evolved": false}
 	_route_sword(flight, target, start)
 	flights.append(flight)
 
 func _route_sword(flight: Dictionary, target: Node3D, start: Vector3) -> void:
 	if flight.tween != null:
 		flight.tween.kill()
+	# Each acquired target is a new attack leg. Keep a committed leg's
+	# snapshot, but do not strand a continuously flying sword at its old rank.
+	flight.coefficient = progression.coefficient("swords")
 	var first := int(flight.leg) == 0
 	var contact := target.global_position + Vector3.UP * 1.05
 	var direction := Vector3(contact.x - start.x, 0, contact.z - start.z).normalized()
 	if direction.length_squared() < 0.01:
 		direction = player.facing
+	flight.evolved = progression.has_evolution("swords_pierce") and target.has_status("bind")
+	if flight.evolved:
+		# The same sword/path skips the orbiting approach, then crosses through
+		# the bound victim with the existing swept-contact strike implementation.
+		flight.blade.position = Vector3.ZERO
+		flight.target = weakref(target)
+		flight.hit_ids.clear()
+		flight.leg += 1
+		if not first:
+			chain_count += 1
+		evolved_strikes += 1
+		feedback.storm_muzzle(start)
+		_strike_sword(flight, target, start)
+		return
 	var side := direction.cross(Vector3.UP) * (-1.0 if (int(flight.slot) + int(flight.leg)) % 2 == 0 else 1.0)
 	# The curved approach ends moving sideways ABOVE the victim, not through them.
 	# A separate straight stab must visibly break this tangent to reach the body.
@@ -476,15 +512,15 @@ func _route_sword(flight: Dictionary, target: Node3D, start: Vector3) -> void:
 	tween.tween_property(flight.blade, "rotation", Vector3(-PI / 2.0, 0, 0), 0.14).set_trans(Tween.TRANS_SINE)
 	flight.tween = tween
 
-func _strike_sword(flight: Dictionary, target: Node3D) -> void:
-	flight.tween.kill()
+func _strike_sword(flight: Dictionary, target: Node3D, start: Vector3) -> void:
+	if flight.tween != null:
+		flight.tween.kill()
 	var follow := flight.follow as PathFollow3D
 	var blade := flight.blade as Node3D
-	var start := follow.global_position
 	var contact := target.global_position + Vector3.UP * 1.05
 	var direction := (contact - start).normalized()
-	# The blade, rather than its pommel, enters the body. Hold it briefly embedded.
-	var destination := contact - direction * (BLADE_CONTACT.y * BLADE_SCALE - 0.22)
+	# Normal strikes stop embedded; the evolved blade clears the body entirely.
+	var destination := contact + direction * 1.4 if flight.evolved else contact - direction * (BLADE_CONTACT.y * BLADE_SCALE - 0.22)
 	var curve := Curve3D.new()
 	curve.add_point(start)
 	curve.add_point(destination)
@@ -492,10 +528,12 @@ func _strike_sword(flight: Dictionary, target: Node3D) -> void:
 	follow.progress = 0.0
 	blade.rotation = Vector3(-PI / 2.0, 0, 0)
 	blade.set_motion(SWORD_VISUAL.Motion.FLIGHT)
-	flight.previous_contact = blade.to_global(BLADE_CONTACT)
+	flight.previous_contact = start if flight.evolved else blade.to_global(BLADE_CONTACT)
 	flight.through = direction
 	flight.phase = FlightPhase.STRIKE
-	var travel_time := curve.get_baked_length() / STRIKE_SPEED
+	# One remaining bound target must not turn close return stabs into a
+	# millisecond damage/particle loop. Retain a readable native action beat.
+	var travel_time := maxf(PIERCE_MIN_TIME if flight.evolved else 0.001, curve.get_baked_length() / STRIKE_SPEED)
 	flight.duration = travel_time + STRIKE_HOLD
 	# No ease-in and no homing bend during a committed stab: speed changes immediately.
 	var tween: Tween = flight.path.create_tween().set_process_mode(Tween.TWEEN_PROCESS_PHYSICS)
@@ -557,7 +595,7 @@ func _advance_swords() -> void:
 			flight.path.curve.set_point_position(2, target.global_position + flight.approach_offset)
 			if flight.tween.is_running():
 				continue
-			_strike_sword(flight, target)
+			_strike_sword(flight, target, follow.global_position)
 			continue
 		# At most one target scan for all re-routing swords in this physics tick.
 		if not found_targets:
@@ -585,17 +623,18 @@ func _strike_contacts(flight: Dictionary) -> void:
 		if body.global_position.distance_to(player.global_position) > RANGE * player.stats.range_multiplier:
 			continue
 		flight.hit_ids.append(body.get_instance_id())
-		var definition := progression.skill("swords")
 		var point := body.global_position + Vector3.UP * 1.05
-		var hit := player.deal_damage(body, definition.kind, progression.coefficient("swords"), definition.element, false, true, "飞剑", flight.through)
+		var hit := player.deal_fabao_damage(body, "swords", flight.coefficient, false, true, flight.through)
 		if hit.get("actual", 0) > 0:
 			sword_hits += 1
 			# Per-contact flashes do not share the arena's camera/accent throttle.
 			feedback.storm_hit(point, flight.through, bool(hit.get("lethal", false)))
 
-func _call_meteor(target: Node3D) -> void:
-	if not player.enabled or progression.skill_level("meteor") == 0:
-		return
+func _call_meteor(target: Node3D, secondary := false) -> bool:
+	if not active or not player.enabled or player.dead or progression.skill_level("meteor") <= 0 or meteors.size() >= 2:
+		return false
+	if not is_instance_valid(target) or target.dead or not target.is_visible_in_tree() or target.global_position.distance_to(player.global_position) > RANGE * player.stats.range_multiplier:
+		return false
 	meteor_count += 1
 	var point := target.global_position
 	point.y = 0.08
@@ -617,7 +656,8 @@ func _call_meteor(target: Node3D) -> void:
 	descent.tween_interval(0.22)
 	descent.tween_property(meteor, "global_position", point, METEOR_DELAY - 0.22).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN)
 	descent.parallel().tween_property(meteor, "rotation", Vector3(0, meteor.rotation.y, 0), METEOR_DELAY - 0.22)
-	meteors.append({"node": meteor, "tween": descent, "warning": warning, "position": point, "start": start, "left": METEOR_DELAY, "radius": radius})
+	meteors.append({"node": meteor, "tween": descent, "warning": warning, "position": point, "start": start, "left": METEOR_DELAY, "radius": radius, "coefficient": progression.coefficient("meteor"), "secondary": secondary})
+	return true
 
 func _advance_meteors(delta: float) -> void:
 	for i in range(meteors.size() - 1, -1, -1):
@@ -646,9 +686,8 @@ func _advance_meteors(delta: float) -> void:
 			if offset.length_squared() > float(meteor.radius) * float(meteor.radius):
 				continue
 			hit_ids.append(body.get_instance_id())
-			var definition := progression.skill("meteor")
 			var direction := (body.global_position - point).normalized()
-			var hit := player.deal_damage(body, definition.kind, progression.coefficient("meteor"), definition.element, true, false, "照天印", direction)
+			var hit := player.deal_fabao_damage(body, "meteor", meteor.coefficient, true, false, direction, true, meteor.secondary)
 			if hit.get("actual", 0) > 0:
 				meteor_hits += 1
 		meteors.remove_at(i)

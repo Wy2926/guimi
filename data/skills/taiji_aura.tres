@@ -6,12 +6,15 @@
 script = ExtResource("1")
 id = "taiji_aura"
 title = "太上老君·太极图"
-description = "领悟随身两仪八卦阵，每1.2秒以清气荡涤阵内敌人，造成光属性魔法伤害。升级提高伤害与半径；范围、冷却属性生效，不击退，不触发辅助技能。"
+description = "随身两仪八卦阵周期荡出清气，造成光属性魔法伤害并施加感电；另一法宝直接命中可消耗感电，向附近最多三敌连锁传导。升级扩大阵域，不击退。"
+system = "artifact"
 category = "passive"
 kind = 1
 coefficient = 0.55
 coefficient_growth = 0.2
 element = 3
+status = "shock"
+status_duration = 3.0
 cooldown = 1.2
 max_level = 5
 radius = 2.6

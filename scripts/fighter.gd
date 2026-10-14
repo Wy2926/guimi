@@ -1,22 +1,17 @@
 class_name DuelFighter
 extends CharacterBody3D
-## Two fixed combo strings, using the original KayKit poses and native animation events.
+## The normal three-move combo uses original KayKit poses and native animation events.
 
 signal swing_started(heavy: bool)
 signal swing_active(heavy: bool)
-signal skill_released
+signal fabao_requested(skill_id: String, target: Node3D)
 signal hit_confirmed(target: Node3D, point: Vector3, result: Dictionary, heavy: bool, source: String)
 signal defeated
-signal ghost_changed(enabled: bool)
 signal hurt(result: Dictionary)
 signal stepped(point: Vector3)
 
 const ATTACK := &"1H_Melee_Attack_Slice_Horizontal"
-const SKILL := &"2H_Melee_Attack_Spin"
-const SKILL_DURATION := 1.04
-const SKILL_SWING := 0.34
-const SKILL_RELEASE := 0.44
-const SKILL_ACTIVE_END := 0.52
+const SPIN := &"2H_Melee_Attack_Spin"
 const COMBO_GRACE := 0.65
 
 # Only this fighter's authored moves, not a general skill/animation framework.
@@ -26,12 +21,13 @@ const NORMAL_COMBO := [
 	{"animation": &"Combo_Rising", "source": &"1H_Melee_Attack_Slice_Diagonal", "label": "逆袈裟", "duration": 0.62, "knots": [Vector2(0, 0), Vector2(0.30, 0.17), Vector2(0.46, 0.29)], "strikes": [0.22], "damage": 28, "style": "rise", "round": false, "lunge": 4.6},
 	{"animation": &"Combo_Cleave", "source": &"2H_Melee_Attack_Chop", "label": "坠刃", "duration": 0.76, "knots": [Vector2(0, 0), Vector2(0.70, 0.23), Vector2(0.90, 0.38)], "strikes": [0.30], "damage": 38, "style": "down", "round": false, "lunge": 5.4},
 ]
-const GHOST_COMBO := [
-	{"animation": &"Ghost_Reaping", "source": &"2H_Melee_Attack_Spinning", "label": "鬼旋双斩", "duration": 0.62, "knots": [Vector2(0, 0), Vector2(0.10, 0.10), Vector2(0.50, 0.40)], "strikes": [0.14, 0.33], "damage": 20, "style": "spin", "round": true, "lunge": 4.2},
-	{"animation": &"Ghost_Rending", "source": &"2H_Melee_Attack_Slice", "label": "血月横断", "duration": 0.56, "knots": [Vector2(0, 0), Vector2(0.30, 0.13), Vector2(0.45, 0.24)], "strikes": [0.18], "damage": 28, "style": "reverse", "round": false, "lunge": 5.8},
-	{"animation": &"Ghost_Piercing", "source": &"2H_Melee_Attack_Stab", "label": "穿魂突刺", "duration": 0.58, "knots": [Vector2(0, 0), Vector2(0.30, 0.13), Vector2(0.46, 0.25)], "strikes": [0.18], "damage": 26, "style": "thrust", "round": false, "lunge": 7.0},
-	{"animation": &"Ghost_Whirlwind", "source": SKILL, "label": "狱轮三裂", "duration": 0.82, "knots": [Vector2(0, 0), Vector2(0.80, 0.16), Vector2(1.60, 0.59)], "strikes": [0.22, 0.37, 0.52], "damage": 16, "style": "spin", "round": true, "lunge": 3.4},
-	{"animation": &"Ghost_Execution", "source": &"2H_Melee_Attack_Chop", "label": "厉鬼断狱", "duration": 0.70, "knots": [Vector2(0, 0), Vector2(0.70, 0.20), Vector2(0.90, 0.34)], "strikes": [0.27], "damage": 38, "style": "down", "round": false, "lunge": 6.2},
+# Retain the authored multi-hit clips for reuse; character bonuses do not select them.
+const DIVINITY_COMBO := [
+	{"animation": &"Divinity_Reaping", "source": &"2H_Melee_Attack_Spinning", "label": "莲轮双击", "duration": 0.62, "knots": [Vector2(0, 0), Vector2(0.10, 0.10), Vector2(0.50, 0.40)], "strikes": [0.14, 0.33], "damage": 20, "style": "spin", "round": true, "lunge": 4.2},
+	{"animation": &"Divinity_Rending", "source": &"2H_Melee_Attack_Slice", "label": "绫影横断", "duration": 0.56, "knots": [Vector2(0, 0), Vector2(0.30, 0.13), Vector2(0.45, 0.24)], "strikes": [0.18], "damage": 28, "style": "reverse", "round": false, "lunge": 5.8},
+	{"animation": &"Divinity_Piercing", "source": &"2H_Melee_Attack_Stab", "label": "火尖突刺", "duration": 0.58, "knots": [Vector2(0, 0), Vector2(0.30, 0.13), Vector2(0.46, 0.25)], "strikes": [0.18], "damage": 26, "style": "thrust", "round": false, "lunge": 7.0},
+	{"animation": &"Divinity_Whirlwind", "source": SPIN, "label": "八臂连环", "duration": 0.82, "knots": [Vector2(0, 0), Vector2(0.80, 0.16), Vector2(1.60, 0.59)], "strikes": [0.22, 0.37, 0.52], "damage": 16, "style": "spin", "round": true, "lunge": 3.4},
+	{"animation": &"Divinity_Execution", "source": &"2H_Melee_Attack_Chop", "label": "乾坤镇落", "duration": 0.70, "knots": [Vector2(0, 0), Vector2(0.70, 0.20), Vector2(0.90, 0.34)], "strikes": [0.27], "damage": 38, "style": "down", "round": false, "lunge": 6.2},
 ]
 
 var progression: RunProgression
@@ -52,37 +48,29 @@ var active := false
 var did_hit := false
 var dead := false
 var recovering := false
-var using_skill := false
-var ghost_active := false
-var ghost_requested := false
-var ghost_left := 0.0
-var ghost_cooldown := 0.0
 var hurt_protection := 0.0
 var _target_refresh := 0.0
 var _heal_budget := 0.0
-var ghost_aura: Node3D
 var combo_index := 0
 var combo_left := 0.0
 var current_move: Dictionary = NORMAL_COMBO[0]
 var strike_index := -1
 var combo_total: int:
-	get: return GHOST_COMBO.size() if ghost_active else NORMAL_COMBO.size()
+	get: return NORMAL_COMBO.size()
 var combo_label: String:
-	get: return "裂环斩" if using_skill else current_move.label
+	get: return current_move.label
 var strike_total: int:
-	get: return 1 if using_skill else current_move.strikes.size()
+	get: return current_move.strikes.size()
 var move_duration: float:
-	get: return SKILL_DURATION if using_skill else current_move.duration
+	get: return current_move.duration
 var attack_speed: float:
-	get: return stats.attack_speed * (progression.skill("ghost").attack_speed_multiplier if ghost_active else 1.0)
-var damage_multiplier: float:
-	get: return progression.skill("ghost").damage_multiplier if ghost_active else 1.0
+	get: return stats.attack_speed
 var combo_finisher: bool:
-	get: return not using_skill and combo_index == combo_total - 1
+	get: return combo_index == combo_total - 1
 var _combo_next := 0
 var _hit_ids: Array[int] = []
-var skill_cooldown := 0.0
-var buffered_skill := false
+var fate_cooldown := 0.0
+var reaction_count := 0
 var freeze_left := 0.0
 var attack_count := 0
 var facing := Vector3.FORWARD
@@ -143,9 +131,8 @@ func _setup_animations() -> void:
 		var source := animation.get_animation(clip).duplicate(true) as Animation
 		source.loop_mode = Animation.LOOP_LINEAR if clip in ["Idle", "Running_A", "Walking_A"] else Animation.LOOP_NONE
 		library.add_animation(clip, source)
-	for move in NORMAL_COMBO + GHOST_COMBO:
+	for move in NORMAL_COMBO + DIVINITY_COMBO:
 		_add_move_animation(library, move)
-	_add_move_animation(library, {"animation": SKILL, "source": SKILL, "duration": SKILL_DURATION, "knots": [Vector2(0, 0), Vector2(0.8, SKILL_SWING), Vector2(1.6, 0.66)], "strikes": [SKILL_RELEASE]}, true)
 	for key in animation.get_animation_library_list():
 		animation.remove_animation_library(key)
 	animation.add_animation_library("", library)
@@ -154,7 +141,7 @@ func _setup_animations() -> void:
 	animation.animation_finished.connect(_on_animation_finished)
 	animation.play("Idle")
 
-func _add_move_animation(library: AnimationLibrary, move: Dictionary, heavy := false) -> void:
+func _add_move_animation(library: AnimationLibrary, move: Dictionary) -> void:
 	var source := animation.get_animation(move.source).duplicate(true) as Animation
 	var knots: Array = move.knots.duplicate()
 	knots.append(Vector2(source.length, move.duration))
@@ -173,14 +160,13 @@ func _add_move_animation(library: AnimationLibrary, move: Dictionary, heavy := f
 	source.track_set_path(events, NodePath("../.."))
 	for i in move.strikes.size():
 		var contact: float = move.strikes[i]
-		source.track_insert_key(events, SKILL_SWING if heavy else contact - 0.03, {"method": &"_start_swing", "args": [i]})
+		source.track_insert_key(events, contact - 0.03, {"method": &"_start_swing", "args": [i]})
 		source.track_insert_key(events, contact, {"method": &"_open_hit_window", "args": []})
-		source.track_insert_key(events, contact + (0.08 if heavy else 0.07), {"method": &"_close_hit_window", "args": []})
-	source.track_insert_key(events, 0.78 if heavy else move.duration * 0.77, {"method": &"_allow_movement", "args": []})
+		source.track_insert_key(events, contact + 0.07, {"method": &"_close_hit_window", "args": []})
+	source.track_insert_key(events, move.duration * 0.77, {"method": &"_allow_movement", "args": []})
 	library.add_animation(move.animation, source)
 
 func reset_fighter() -> void:
-	_clear_ghost()
 	collision_layer = 2
 	collision_mask = 1
 	health = stats.max_health
@@ -189,20 +175,17 @@ func reset_fighter() -> void:
 	active = false
 	did_hit = false
 	recovering = false
-	using_skill = false
 	combo_index = 0
 	_combo_next = 0
 	combo_left = 0.0
 	current_move = NORMAL_COMBO[0]
 	strike_index = -1
 	_hit_ids.clear()
-	skill_cooldown = 0.0
-	ghost_cooldown = 0.0
-	ghost_left = 0.0
+	fate_cooldown = 0.0
+	reaction_count = 0
 	hurt_protection = 0.0
 	_heal_budget = 0.0
 	opponent = null
-	buffered_skill = false
 	attack_count = 0
 	freeze_left = 0.0
 	velocity = Vector3.ZERO
@@ -221,82 +204,26 @@ func reset_fighter() -> void:
 	reset_physics_interpolation()
 	_refresh_range()
 
-func request_ghost() -> void:
-	if dead or not enabled or ghost_active or ghost_requested or ghost_cooldown > 0.0 or progression.skill_level("ghost") == 0:
-		return
-	ghost_cooldown = progression.skill("ghost").cooldown * stats.cooldown_multiplier
-	ghost_requested = true
-	if not attacking:
-		_apply_ghost()
-
-func _apply_ghost() -> void:
-	if ghost_active == ghost_requested:
-		return
-	ghost_active = ghost_requested
-	_combo_next = 0
-	combo_index = 0
-	combo_left = 0.0
-	strike_index = -1
-	current_move = GHOST_COMBO[0] if ghost_active else NORMAL_COMBO[0]
-	if is_instance_valid(ghost_aura):
-		ghost_aura.queue_free()
-	ghost_aura = null
-	if ghost_active:
-		ghost_left = progression.skill("ghost").duration_at(progression.skill_level("ghost"))
-		ghost_aura = feedback.create_ghost_aura(self)
-	flash_material.set_shader_parameter("ghost_strength", 0.6 if ghost_active else 0.0)
-	sword_glow.set_shader_parameter("ghost_strength", 0.8 if ghost_active else 0.0)
-	_refresh_range()
-	ghost_changed.emit(ghost_active)
-
-func _clear_ghost() -> void:
-	ghost_active = false
-	ghost_requested = false
-	ghost_left = 0.0
-	if is_instance_valid(ghost_aura):
-		ghost_aura.queue_free()
-	ghost_aura = null
-	if is_instance_valid(flash_material):
-		flash_material.set_shader_parameter("ghost_strength", 0.0)
-	if is_instance_valid(sword_glow):
-		sword_glow.set_shader_parameter("ghost_strength", 0.0)
-
 func get_attack_phase() -> String:
 	if not attacking:
 		return "就绪"
 	var time := animation.current_animation_position
-	var first: float = SKILL_SWING if using_skill else current_move.strikes[0] - 0.03
-	var last: float = SKILL_ACTIVE_END if using_skill else current_move.strikes.back() + 0.07
+	var first: float = current_move.strikes[0] - 0.03
+	var last: float = current_move.strikes.back() + 0.07
 	return "蓄势" if time < first else ("挥斩" if time < last else "收势")
 
-func request_skill() -> void:
-	if dead or not enabled or skill_cooldown > 0.0:
-		return
-	if attacking:
-		# Manual skill has priority over the next automatic swing; at most one request.
-		buffered_skill = true
-		return
-	_begin_attack(true)
-
-func _begin_attack(heavy := false) -> void:
+func _begin_attack() -> void:
 	attacking = true
-	using_skill = heavy
-	if heavy:
-		skill_cooldown = progression.skill("ring").cooldown * stats.cooldown_multiplier
+	if combo_left <= 0.0:
 		_combo_next = 0
-		combo_left = 0.0
-	else:
-		if combo_left <= 0.0:
-			_combo_next = 0
-		combo_index = _combo_next
-		current_move = (GHOST_COMBO if ghost_active else NORMAL_COMBO)[combo_index]
-		_combo_next = (combo_index + 1) % combo_total
+	combo_index = _combo_next
+	current_move = NORMAL_COMBO[combo_index]
+	_combo_next = (combo_index + 1) % combo_total
 	recovering = false
 	active = false
 	did_hit = false
 	strike_index = -1
 	_hit_ids.clear()
-	buffered_skill = false
 	attack_count += 1
 	_acquire_target()
 	if is_instance_valid(opponent) and not opponent.dead and opponent.is_visible_in_tree():
@@ -309,14 +236,14 @@ func _begin_attack(heavy := false) -> void:
 	hitbox.rotation.y = visual.rotation.y
 	_refresh_range()
 	animation.speed_scale = attack_speed
-	animation.play(SKILL if heavy else current_move.animation, 0.045, 1.0)
-	swing_started.emit(heavy)
+	animation.play(current_move.animation, 0.045, 1.0)
+	swing_started.emit(false)
 
 func _start_swing(strike := 0) -> void:
 	if not attacking or dead:
 		return
 	strike_index = strike
-	swing_active.emit(using_skill)
+	swing_active.emit(false)
 
 func _open_hit_window() -> void:
 	if not attacking:
@@ -324,8 +251,6 @@ func _open_hit_window() -> void:
 	active = true
 	did_hit = false
 	_hit_ids.clear()
-	if using_skill:
-		skill_released.emit()
 	_try_hit()
 
 func _close_hit_window() -> void:
@@ -337,7 +262,7 @@ func _allow_movement() -> void:
 func _try_hit() -> void:
 	if not active or dead:
 		return
-	var round_attack: bool = using_skill or current_move.round
+	var round_attack: bool = current_move.round
 	var area := skill_hitbox if round_attack else hitbox
 	for body in area.get_overlapping_bodies():
 		if body.is_in_group("enemies") and not body.dead and body.get_instance_id() not in _hit_ids:
@@ -348,23 +273,33 @@ func _try_hit() -> void:
 			_hit_ids.append(body.get_instance_id())
 			var first_contact := not did_hit
 			did_hit = true
-			var id := "ring" if using_skill else "slash"
-			var coefficient := progression.coefficient(id) * damage_multiplier
-			if not using_skill:
-				coefficient *= float(current_move.damage) / 25.0
-			var linking := not using_skill and strike_index < strike_total - 1
-			var heavy_hit := using_skill or combo_finisher
-			var definition := progression.skill(id)
-			var result := deal_damage(body, definition.kind, coefficient, definition.element, heavy_hit, linking, "裂环斩" if using_skill else ("厉鬼" if ghost_active else "连斩"))
+			var coefficient := float(current_move.damage) / 25.0
+			var linking := strike_index < strike_total - 1
+			var heavy_hit := combo_finisher
+			# Basic contact remains neutral; character bonuses belong to artifacts.
+			var result := deal_damage(body, DamageRules.Kind.PHYSICAL, coefficient, DamageRules.Element.NONE, heavy_hit, linking, "近战")
 			# One short animation accent per window. Movement never freezes with it.
 			if first_contact and result.get("actual", 0) > 0:
 				freeze_left = 0.035 if heavy_hit else 0.018
 				animation.speed_scale = 0.0
 
-func deal_damage(target: Node3D, kind: int, coefficient: float, element := -1, heavy := false, spectral := false, source := "", hit_direction := Vector3.ZERO, apply_control := true) -> Dictionary:
+func deal_fabao_damage(target: Node3D, skill_id: String, coefficient: float = -1.0, heavy: bool = false, spectral: bool = false, hit_direction: Vector3 = Vector3.ZERO, apply_control: bool = true, secondary: bool = false) -> Dictionary:
+	var definition := progression.skill(skill_id)
+	if definition == null or progression.skill_level(skill_id) <= 0:
+		return {"actual": 0.0, "lethal": false}
+	var power := progression.coefficient(skill_id) if coefficient < 0.0 else coefficient
+	return deal_damage(target, definition.kind, power, definition.element, heavy, spectral, definition.title.get_slice("·", 1), hit_direction, apply_control, {"skill_id": skill_id, "secondary": secondary})
+
+func deal_damage(target: Node3D, kind: int, coefficient: float, element := DamageRules.Element.NONE, heavy := false, spectral := false, source := "", hit_direction := Vector3.ZERO, apply_control := true, context: Dictionary = {}) -> Dictionary:
 	if dead or not enabled or not is_instance_valid(target) or target.dead:
 		return {"actual": 0, "lethal": false}
-	var result := DamageRules.calculate(stats, target.stats, kind, coefficient, element)
+	var periodic := bool(context.get("periodic", false))
+	var result := DamageRules.calculate(stats, target.stats, kind, coefficient, element, 1.0 if periodic else -1.0, 1.0 if periodic else -1.0)
+	result["skill_id"] = String(context.get("skill_id", ""))
+	result["secondary"] = bool(context.get("secondary", false))
+	var prior_states: Dictionary = {}
+	if not bool(result.secondary) and progression.skill(String(result.skill_id)) != null:
+		prior_states = {"shock": target.get_status("shock"), "freeze": target.get_status("freeze")}
 	var direction: Vector3 = hit_direction if hit_direction.length_squared() > 0.0001 else target.global_position - global_position
 	direction.y = 0.0
 	direction = direction.normalized()
@@ -375,7 +310,71 @@ func deal_damage(target: Node3D, kind: int, coefficient: float, element := -1, h
 		health = minf(stats.max_health, health + healing)
 		_heal_budget -= healing
 		hit_confirmed.emit(target, target.global_position + Vector3.UP * 1.1, result, heavy, source)
+		# Accepted HP loss is the only proc entry. Misses, immunity and
+		# overkill cannot apply status or spawn artifacts.
+		if enabled and not dead:
+			if not bool(result.secondary):
+				_resolve_direct_hit(target, result, prior_states)
 	return result
+
+func _resolve_direct_hit(target: Node3D, result: Dictionary, prior_states: Dictionary) -> void:
+	var id := String(result.skill_id)
+	var definition := progression.skill(id)
+	if definition != null:
+		# Read existing states before this hit applies its own. This makes
+		# cross-artifact ordering explicit and prevents a self-trigger loop.
+		# A lethal hit clears receiver-owned states. Retain the accepted
+		# contact's snapshot so killing a marked target still conducts/shatters.
+		var shocked: Dictionary = prior_states.get("shock", {})
+		if not shocked.is_empty() and String(shocked.skill_id) != id and float(shocked.reaction_left) <= 0.0:
+			var shock_owner := (shocked.source as WeakRef).get_ref() as DuelFighter
+			if is_instance_valid(shock_owner) and shock_owner.enabled and not shock_owner.dead:
+				if not target.dead and target.has_status("shock"):
+					target.statuses.shock.charges = int(shocked.charges) - 1
+					target.statuses.shock.reaction_left = 0.35
+					if int(target.statuses.shock.charges) <= 0:
+						target.remove_status("shock")
+				for neighbor: Node3D in reaction_targets(target, 3.0, 3):
+					shock_owner.deal_damage(neighbor, DamageRules.Kind.MAGICAL, 0.30 * float(shocked.potency), DamageRules.Element.LIGHT, false, false, "感电传导", Vector3.ZERO, false, {"secondary": true, "skill_id": String(shocked.skill_id)})
+				reaction_count += 1
+		if not Dictionary(prior_states.get("freeze", {})).is_empty() and (int(result.element) == DamageRules.Element.FIRE or int(result.kind) in [DamageRules.Kind.PHYSICAL, DamageRules.Kind.FIXED]):
+			target.remove_status("freeze")
+			var victims := reaction_targets(target, 3.0, 3)
+			victims.push_front(target)
+			for victim: Node3D in victims:
+				deal_damage(victim, DamageRules.Kind.MAGICAL, 0.35, DamageRules.Element.ICE, false, false, "破冰", Vector3.ZERO, false, {"secondary": true, "skill_id": id})
+			reaction_count += 1
+		if enabled and not target.dead and not definition.status.is_empty():
+			target.apply_status(definition.status, self, id, definition.status_duration)
+	if enabled and not target.dead and bool(result.get("critical", false)) and id != "meteor" and fate_cooldown <= 0.0 and progression.has_fate("crit_seal") and progression.skill_level("meteor") > 0:
+		fate_cooldown = 1.5
+		fabao_requested.emit("meteor", target)
+
+func reaction_targets(origin: Node3D, radius: float, limit: int) -> Array[Node3D]:
+	var candidates: Array[Node3D] = []
+	if not is_instance_valid(origin) or not is_inside_tree():
+		return candidates
+	for candidate: Node3D in get_tree().get_nodes_in_group("enemies"):
+		if candidate == origin or candidate.dead or not candidate.is_inside_tree():
+			continue
+		var offset := candidate.global_position - origin.global_position
+		offset.y = 0.0
+		if offset.length_squared() <= radius * radius:
+			candidates.append(candidate)
+	candidates.sort_custom(func(a: Node3D, b: Node3D) -> bool:
+		var distance_a := a.global_position.distance_squared_to(origin.global_position)
+		var distance_b := b.global_position.distance_squared_to(origin.global_position)
+		return a.get_instance_id() < b.get_instance_id() if is_equal_approx(distance_a, distance_b) else distance_a < distance_b)
+	if candidates.size() > limit:
+		candidates.resize(maxi(0, limit))
+	return candidates
+
+func deal_status_damage(target: Node3D, status_id: String, status: Dictionary) -> Dictionary:
+	var definition := progression.skill(String(status.skill_id))
+	if definition == null or not ArenaEnemy.STATUS_RULES.has(status_id) or not ArenaEnemy.STATUS_RULES[status_id].has("coefficient"):
+		return {"actual": 0.0, "lethal": false}
+	var coefficient := float(ArenaEnemy.STATUS_RULES[status_id].coefficient) * float(status.potency)
+	return deal_damage(target, definition.kind, coefficient, definition.element, false, false, String(ArenaEnemy.STATUS_RULES[status_id].title), Vector3.ZERO, false, {"secondary": true, "periodic": true, "skill_id": String(status.skill_id)})
 
 func receive_damage(incoming: Dictionary, _direction: Vector3, _heavy := false, _spectral := false, _apply_control := true) -> Dictionary:
 	var result := incoming.duplicate()
@@ -401,7 +400,6 @@ func receive_damage(incoming: Dictionary, _direction: Vector3, _heavy := false, 
 		dead = true
 		attacking = false
 		active = false
-		_clear_ghost()
 		set_deferred("collision_layer", 0)
 		animation.speed_scale = 1.0
 		animation.play("Death_B", 0.06)
@@ -411,18 +409,9 @@ func receive_damage(incoming: Dictionary, _direction: Vector3, _heavy := false, 
 func _physics_process(delta: float) -> void:
 	if not enabled or dead:
 		return
-	skill_cooldown = maxf(0.0, skill_cooldown - delta)
-	ghost_cooldown = maxf(0.0, ghost_cooldown - delta)
+	fate_cooldown = maxf(0.0, fate_cooldown - delta)
 	hurt_protection = maxf(0.0, hurt_protection - delta)
 	_heal_budget = minf(stats.max_health * 0.12, _heal_budget + stats.max_health * 0.12 * delta)
-	if ghost_active:
-		ghost_left = maxf(0.0, ghost_left - delta)
-		if ghost_left == 0:
-			ghost_requested = false
-	var time := animation.current_animation_position
-	var glow := clampf(time / SKILL_SWING, 0.0, 1.0) * (1.0 - smoothstep(0.66, 0.86, time)) if using_skill else 0.0
-	sword_glow.set_shader_parameter("tint", Color("ff426f") if ghost_active else Color("62ddff"))
-	sword_glow.set_shader_parameter("flash", glow * 0.78)
 	if freeze_left > 0.0:
 		freeze_left = maxf(0.0, freeze_left - delta)
 		if freeze_left == 0.0:
@@ -431,7 +420,6 @@ func _physics_process(delta: float) -> void:
 	flash_material.set_shader_parameter("flash", move_toward(flash, 0.0, delta * 12.0))
 	if not attacking:
 		combo_left = maxf(0.0, combo_left - delta)
-		_apply_ghost()
 	_target_refresh -= delta
 	if _target_refresh <= 0.0:
 		_target_refresh = 0.10
@@ -466,7 +454,7 @@ func _player_motion(delta: float) -> void:
 	forward.y = 0
 	forward = forward.normalized()
 	var direction := right * input.x + forward * input.y
-	var speed := stats.move_speed * (0.65 if using_skill and not recovering else 1.0)
+	var speed := stats.move_speed
 	velocity.x = move_toward(velocity.x, direction.x * speed, 32.0 * delta)
 	velocity.z = move_toward(velocity.z, direction.z * speed, 32.0 * delta)
 	if direction.length() > 0.1:
@@ -477,7 +465,7 @@ func _player_motion(delta: float) -> void:
 		_play_locomotion(direction.length() > 0.1, "Running_A", 1.25)
 
 func _attack_reach() -> float:
-	return 2.25 * stats.range_multiplier * (1.3 if ghost_active else 1.0)
+	return 2.25 * stats.range_multiplier
 
 func _acquire_target() -> void:
 	var reach := _attack_reach()
@@ -494,7 +482,7 @@ func _acquire_target() -> void:
 			opponent = candidate
 
 func _refresh_range() -> void:
-	var reach := stats.range_multiplier * (1.3 if ghost_active else 1.0)
+	var reach := stats.range_multiplier
 	hitbox.scale = Vector3(reach, 1, reach)
 	skill_hitbox.scale = Vector3(reach, 1, reach)
 
@@ -505,16 +493,10 @@ func _play_locomotion(moving: bool, walk: String, speed: float) -> void:
 		animation.play(clip, 0.14, speed if moving else 1.0)
 
 func _on_animation_finished(clip: StringName) -> void:
-	if attacking and (clip == SKILL or clip == current_move.animation):
+	if attacking and clip == current_move.animation:
 		attacking = false
 		active = false
 		recovering = false
-		combo_left = 0.0 if using_skill else COMBO_GRACE
-		using_skill = false
+		combo_left = COMBO_GRACE
 		animation.speed_scale = 1.0
-		_apply_ghost()
-		if enabled and not dead and buffered_skill and skill_cooldown <= 0:
-			buffered_skill = false
-			_begin_attack(true)
-		else:
-			animation.play("Idle", 0.1)
+		animation.play("Idle", 0.1)

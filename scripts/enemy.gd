@@ -15,6 +15,7 @@ var dead := false
 var kind := "chaser"
 var elite := false
 var boss := false
+var affinity := DamageRules.Element.NONE
 var experience_value := 6
 var target: Node3D
 var camera: Camera3D
@@ -42,6 +43,23 @@ var _meshes: Array[MeshInstance3D] = []
 var _safe_velocity := Vector3.ZERO
 var _avoidance_ready := false
 var _gravity_wells: Array[Area3D] = []
+# The receiver owns its abnormal states just as it owns health and control.
+# No global timer/event bus or duplicate damage implementation.
+const STATUS_RULES := {
+	"burn": {"title": "灼烧", "duration": 4.0, "coefficient": 0.18},
+	"bleed": {"title": "出血", "duration": 3.0, "coefficient": 0.12},
+	"poison": {"title": "中毒", "duration": 5.0, "coefficient": 0.16},
+	"shock": {"title": "感电", "duration": 3.0},
+	"curse": {"title": "咒印", "duration": 4.0},
+	"freeze": {"title": "冰冻", "duration": 1.5},
+	"bind": {"title": "束缚", "duration": 2.0},
+	"stun": {"title": "眩晕", "duration": 0.8},
+}
+const CONTROL_STATUSES := ["freeze", "bind", "stun"]
+const DOT_INTERVAL := 0.5
+var statuses: Dictionary = {}
+var _control_recovery: Dictionary = {}
+var _status_label: Label3D
 
 func configure(kind_name: String, stage: int, element_id: int, is_elite := false, is_boss := false) -> void:
 	kind = kind_name
@@ -59,13 +77,12 @@ func configure(kind_name: String, stage: int, element_id: int, is_elite := false
 	stats.crit_multiplier = 1.5
 	stats.dodge_chance = 0.0
 	stats.move_speed = 2.55 + minf(level * 0.045, 0.45)
-	stats.element = clampi(element_id, 0, 4)
-	stats.element_bonus = [0.0, 0.0, 0.0, 0.0]
+	affinity = clampi(element_id, 0, 4)
 	stats.resistances = [0.0, 0.0, 0.0, 0.0]
-	if stats.element > 0:
-		stats.resistances[stats.element - 1] = 0.35
+	if affinity > 0:
+		stats.resistances[affinity - 1] = 0.35
 		var opposite := [0, 2, 1, 4, 3]
-		stats.resistances[opposite[stats.element] - 1] = -0.20
+		stats.resistances[opposite[affinity] - 1] = -0.20
 	experience_value = 6
 	if kind == "charger":
 		stats.max_health *= 1.25
@@ -116,7 +133,7 @@ func _ready() -> void:
 		_meshes.append(mesh)
 	var ring_material := StandardMaterial3D.new()
 	ring_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	ring_material.albedo_color = ELEMENT_COLORS[stats.element]
+	ring_material.albedo_color = ELEMENT_COLORS[affinity]
 	ring_material.emission_enabled = true
 	ring_material.emission = ring_material.albedo_color
 	ring_material.emission_energy_multiplier = 0.7
@@ -148,6 +165,9 @@ func _physics_process(delta: float) -> void:
 		if _state_left <= 0.0:
 			queue_free()
 		return
+	advance_statuses(delta)
+	if dead:
+		return
 	if not is_instance_valid(target) or target.dead:
 		velocity = Vector3.ZERO
 		avoidance.velocity = Vector3.ZERO
@@ -162,7 +182,10 @@ func _physics_process(delta: float) -> void:
 	toward.y = 0.0
 	var distance := toward.length()
 	var desired := Vector3.ZERO
-	if _stagger_left > 0.0:
+	var incapacitated := has_status("freeze") or has_status("stun")
+	if incapacitated:
+		desired = Vector3.ZERO
+	elif _stagger_left > 0.0:
 		desired = _push
 	elif _state == State.WINDUP:
 		_state_left -= delta
@@ -219,8 +242,14 @@ func _physics_process(delta: float) -> void:
 		pull += inward.normalized() * speed
 	pull = pull.limit_length(pull_limit)
 	var requested := desired * (slow if _stagger_left <= 0.0 else 1.0) + pull + (_push if _stagger_left <= 0.0 else Vector3.ZERO)
+	if incapacitated:
+		requested = Vector3.ZERO
+	elif has_status("bind"):
+		# Bound enemies may attack in reach, and existing gravity wells can pull
+		# them into a seal. Their own locomotion/charge cannot escape the bind.
+		requested = pull
 	requested.y = 0.0
-	var can_avoid := _state == State.APPROACH and _stagger_left <= 0.0 and _push.length_squared() < 0.01 and is_equal_approx(slow, 1.0)
+	var can_avoid := not incapacitated and not has_status("bind") and _state == State.APPROACH and _stagger_left <= 0.0 and _push.length_squared() < 0.01 and is_equal_approx(slow, 1.0)
 	# Native RVO works on the world's default map without a navigation mesh/path query.
 	avoidance.target_position = target.global_position
 	# Fixed windups, charge lanes and knockback are obstacles to approaching enemies.
@@ -315,7 +344,7 @@ func _release_attack() -> void:
 func _damage_target(damage_kind: int, coefficient: float, direction: Vector3, heavy := false) -> void:
 	if not is_instance_valid(target) or target.dead:
 		return
-	var result := DamageRules.calculate(stats, target.stats, damage_kind, coefficient)
+	var result := DamageRules.calculate(stats, target.stats, damage_kind, coefficient, affinity)
 	target.receive_damage(result, direction, heavy)
 
 func _cast_visible() -> bool:
@@ -325,7 +354,7 @@ func _cast_visible() -> bool:
 
 func _launch_projectile(direction: Vector3, speed: float, coefficient: float) -> void:
 	var projectile := PROJECTILE.new() as Area3D
-	projectile.configure(stats, target, direction, speed, coefficient)
+	projectile.configure(stats, target, direction, speed, coefficient, affinity)
 	add_child(projectile)
 	projectile.top_level = true
 	projectile.global_position = global_position + Vector3.UP * 0.95 + direction * 0.7
@@ -368,8 +397,126 @@ func receive_damage(result: Dictionary, direction: Vector3, heavy := false, spec
 		_clear_warning()
 		footing.hide()
 		_play("Death_B")
+		_spread_cursed_death()
+		statuses.clear()
+		_control_recovery.clear()
+		_refresh_status_label()
 		defeated.emit(self)
 	return applied
+
+func has_status(id: String) -> bool:
+	return statuses.has(id) and float(statuses[id].remaining) > 0.0
+
+func get_status(id: String) -> Dictionary:
+	return statuses[id].duplicate() if has_status(id) else {}
+
+func apply_status(id: String, source: DuelFighter, skill_id: String, duration: float = -1.0, potency: float = 1.0, secondary: bool = false) -> bool:
+	if dead or not STATUS_RULES.has(id) or not is_instance_valid(source) or source.dead or not source.enabled or potency <= 0.0:
+		return false
+	var lifetime: float = float(STATUS_RULES[id].duration) if duration < 0.0 else duration
+	if lifetime <= 0.0:
+		return false
+	if id in CONTROL_STATUSES:
+		# Repeated pulses cannot refresh a hard control forever. Each control
+		# has one second of recovery after expiry/consumption; bosses are immune.
+		if boss or has_status(id) or float(_control_recovery.get(id, 0.0)) > 0.0:
+			return false
+		lifetime *= 0.35 if elite else 1.0
+	var previous := get_status(id)
+	if not previous.is_empty():
+		# Refresh does not reset the tick clock (fast hits must not starve DoT).
+		previous.remaining = maxf(float(previous.remaining), lifetime)
+		# A same-strength propagated copy must not overwrite an original
+		# artifact application and silently take away its chaining eligibility.
+		if potency > float(previous.potency) or (is_equal_approx(potency, float(previous.potency)) and (not secondary or bool(previous.secondary))):
+			previous.potency = potency
+			previous.source = weakref(source)
+			previous.skill_id = skill_id
+			previous.secondary = secondary
+		if id == "shock":
+			previous.charges = 3
+		statuses[id] = previous
+	else:
+		statuses[id] = {"source": weakref(source), "skill_id": skill_id, "remaining": lifetime, "potency": potency, "secondary": secondary, "tick_left": DOT_INTERVAL, "charges": 3 if id == "shock" else 0, "reaction_left": 0.0}
+	if id in ["freeze", "stun"]:
+		_clear_warning()
+		_state = State.RECOVER
+		_state_left = 0.25
+		_push = Vector3.ZERO
+		velocity = Vector3.ZERO
+		_safe_velocity = Vector3.ZERO
+		_play("Idle")
+	_refresh_status_label()
+	return true
+
+func remove_status(id: String) -> void:
+	if statuses.erase(id) and id in CONTROL_STATUSES:
+		_control_recovery[id] = 1.0
+	_refresh_status_label()
+
+func advance_statuses(delta: float) -> void:
+	if dead or delta <= 0.0 or (is_inside_tree() and get_tree().paused):
+		return
+	for id: String in _control_recovery.keys():
+		_control_recovery[id] = maxf(0.0, float(_control_recovery[id]) - delta)
+		if is_zero_approx(float(_control_recovery[id])):
+			_control_recovery.erase(id)
+	for id: String in statuses.keys():
+		if dead:
+			break
+		if not statuses.has(id):
+			continue
+		var status: Dictionary = statuses[id]
+		var source := (status.source as WeakRef).get_ref() as DuelFighter
+		if not is_instance_valid(source) or source.dead or not source.enabled:
+			remove_status(id)
+			continue
+		var elapsed := minf(delta, float(status.remaining))
+		status.remaining = maxf(0.0, float(status.remaining) - delta)
+		status.reaction_left = maxf(0.0, float(status.reaction_left) - delta)
+		if STATUS_RULES[id].has("coefficient"):
+			status.tick_left = float(status.tick_left) - elapsed
+			# Catch up the finite elapsed lifetime, not an unbounded proc loop.
+			while float(status.tick_left) <= 0.00001 and not dead and source.enabled:
+				status.tick_left += DOT_INTERVAL
+				source.deal_status_damage(self, id, status)
+		if not dead and float(status.remaining) <= 0.0:
+			remove_status(id)
+
+func _spread_cursed_death() -> void:
+	if not has_status("curse") or bool(statuses.curse.secondary):
+		return
+	var source := (statuses.curse.source as WeakRef).get_ref() as DuelFighter
+	if not is_instance_valid(source) or not source.enabled or source.dead:
+		return
+	for recipient: Node3D in source.reaction_targets(self, 3.0, 3):
+		for id: String in ["burn", "poison", "bleed"]:
+			var carried := get_status(id)
+			if carried.is_empty() or bool(carried.secondary):
+				continue
+			var owner := (carried.source as WeakRef).get_ref() as DuelFighter
+			recipient.apply_status(id, owner, String(carried.skill_id), float(carried.remaining), float(carried.potency), true)
+
+func _refresh_status_label() -> void:
+	if statuses.is_empty():
+		if is_instance_valid(_status_label):
+			_status_label.hide()
+		return
+	if not is_instance_valid(_status_label):
+		_status_label = Label3D.new()
+		_status_label.font = preload("res://assets/fonts/interface.tres")
+		_status_label.font_size = 28
+		_status_label.pixel_size = 0.007
+		_status_label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+		_status_label.no_depth_test = true
+		_status_label.modulate = Color("eee7d7")
+		_status_label.position.y = 2.0 if not boss else 3.2
+		add_child(_status_label)
+	var names := PackedStringArray()
+	for id: String in statuses:
+		names.append(String(STATUS_RULES[id].title))
+	_status_label.text = " · ".join(names)
+	_status_label.show()
 
 func _set_flash_visible(enabled: bool) -> void:
 	if _flash_active == enabled:

@@ -5,12 +5,15 @@
 [resource]
 script = ExtResource("1")
 id = "swords"
-title = "万剑归宗"
-description = "光剑横向环绕周身，自动加速斜刺8.5米内的敌人，命中爆闪，无需普攻；无目标时归位，随等级增至六柄。读取独立攻击力，绕过双防，仍受元素与暴击影响。"
+title = "通天教主·诛仙剑阵"
+description = "群剑环身，自动绕行蓄势后突刺；造成无属性固定伤害并施加出血。升级增加剑数；与混天绫组合进化后，对束缚目标改为直接贯穿突刺。"
+system = "artifact"
 category = "passive"
 kind = 2
 coefficient = 0.2
 coefficient_growth = 0.2
-element = -1
+element = 0
+status = "bleed"
+status_duration = 3.0
 max_level = 5
 counts = Array[int]([2, 3, 4, 5, 6])

@@ -5,13 +5,16 @@
 [resource]
 script = ExtResource("1")
 id = "thunder_orb"
-title = "雷缚珠"
-description = "投射紫电黑珠，碰敌停驻并展开黑洞4秒，持续减速、牵引附近敌人；造成暗属性魔法伤害。"
+title = "赵公明·定海珠"
+description = "宝珠碰敌展开定海法域，持续牵引、减速，造成暗属性魔法伤害并施加诅咒；诅咒目标死亡会向附近敌人传播原有灼烧、出血或中毒。暗域聚敌为本作改编。"
+system = "artifact"
 category = "passive"
 kind = 1
 coefficient = 0.6
 coefficient_growth = 0.2
 element = 4
+status = "curse"
+status_duration = 4.0
 cooldown = 4.5
 max_level = 5
 duration = 4.0

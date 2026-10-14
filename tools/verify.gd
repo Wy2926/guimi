@@ -25,6 +25,9 @@ var orb_checks_completed := false
 var aura_checks_completed := false
 var seal_checks_completed := false
 var ribbon_checks_completed := false
+var divinity_checks_completed := false
+var status_checks_completed := false
+var fate_checks_completed := false
 var max_ribbon_particle_slots := 0
 var max_ribbon_spine_bones := 0
 var max_ribbon_history_points := 0
@@ -119,13 +122,19 @@ func release_movement() -> void:
 
 func prepare(automatic := false) -> void:
 	release_movement()
+	scene.progression.divinity = preload("res://data/skills/nezha.tres")
 	scene.restart()
 	scene.director.enabled = false
 	scene.director._spawn_timer.stop()
+	# The real run starts with swords; isolated fixtures explicitly lock all five.
+	for id: String in scene.progression.skills:
+		scene.progression.skills[id] = 0
+	scene.storm.reset()
+	scene.orbs.refresh_skills()
+	scene.aura.refresh_skills()
 	scene.player.auto_attack = automatic
 	scene.player.stats.crit_chance = 0.0
 	scene.storm.active = true
-	scene.storm.meteor_chance = 0.28
 	await physics_wait(0.04)
 
 func enemy_at(point: Vector3, health := 500.0, kind := "chaser", moving := false) -> ArenaEnemy:
@@ -184,7 +193,12 @@ func run() -> void:
 	check_progression()
 	await check_skill_upgrade_ui()
 	await check_automatic_combat()
-	await check_active_skills()
+	await check_divinity()
+	check(divinity_checks_completed, "Divinity checks finish without a skipped runtime error")
+	await check_combat_statuses()
+	check(status_checks_completed, "Abnormal-state and artifact-reaction checks finish without a skipped runtime error")
+	await check_fates_and_evolution()
+	check(fate_checks_completed, "Fate and evolution checks finish without a skipped runtime error")
 	await check_incoming_damage()
 	await check_pickups_and_choices()
 	await check_pause()
@@ -289,12 +303,11 @@ func check_damage_rules() -> void:
 	defender.physical_defense = 10000.0
 	defender.magic_defense = 10000.0
 	check(DamageRules.calculate(attacker, defender, 2, 1.0, 0, 1.0, 1.0).damage == 300, "Increasing either defense does not reduce fixed damage")
-	attacker.element = DamageRules.Element.FIRE
-	attacker.element_bonus[0] = 0.2
 	defender.resistances[0] = 0.35
-	check(DamageRules.calculate(attacker, defender, 2, 1.0, -1, 1.0, 1.0).damage == 255, "Fixed damage still uses the inherited element and resistance")
-	check(DamageRules.calculate(attacker, defender, 2, 1.0, -1, 0.0, 1.0).damage == 510, "Element-adjusted fixed damage can critically strike")
+	check(DamageRules.calculate(attacker, defender, 2, 1.0, DamageRules.Element.FIRE, 1.0, 1.0).damage == 195, "Fixed damage uses only the explicitly supplied artifact element and resistance")
+	check(DamageRules.calculate(attacker, defender, 2, 1.0, DamageRules.Element.FIRE, 0.0, 1.0).damage == 390, "Element-adjusted fixed damage can critically strike")
 	check(DamageRules.calculate(attacker, defender, 2, 1.0, 0, 1.0, 1.0).damage == 300, "Explicit no-element damage does not use elemental modifiers")
+	check(DamageRules.calculate(attacker, defender, 2, 1.0, -1, 1.0, 1.0).element == DamageRules.Element.NONE, "A legacy negative element cannot inherit a player-wide enchantment")
 	defender.dodge_chance = 0.5
 	var evade := DamageRules.calculate(attacker, defender, 2, 1.0, -1, 0.0, 0.0)
 	check(evade.damage == 0 and evade.dodged and not evade.critical, "Fixed damage respects evasion without a phantom critical hit")
@@ -309,13 +322,26 @@ func check_progression() -> void:
 	first.reset()
 	second.reset()
 	first.stats.physical_attack = 99.0
-	first.stats.element_bonus[0] = 0.8
-	check(second.stats.physical_attack == 25.0 and first.base_stats.physical_attack == 25.0 and second.stats.element_bonus[0] == 0.0 and first.base_stats.element_bonus[0] == 0.0, "Each run deep-copies stats and elemental arrays without changing its starting Resource")
+	first.stats.resistances[0] = 0.8
+	check(second.stats.physical_attack == 25.0 and first.base_stats.physical_attack == 25.0 and second.stats.resistances[0] == 0.0 and first.base_stats.resistances[0] == 0.0, "Each run deep-copies stats and resistance arrays without changing its starting Resource")
 	first.reset()
 	var ids: Array[String] = []
 	for option: Dictionary in first._available_choices():
 		ids.append(option.id)
-	check(ids.has("physical_attack") and not ids.has("magic_attack") and not ids.has("independent_attack"), "The starting swordmaster offers physical attack and excludes attacks with no unlocked beneficiary")
+	check(ids.has("physical_attack") and not ids.has("magic_attack") and ids.has("independent_attack"), "Innate melee and the starting swords offer physical and independent attack, not unused magic attack")
+	var artifact_ids: Array[String] = []
+	var explicit_elements := true
+	for definition: SkillDefinition in first.skill_definitions:
+		artifact_ids.append(definition.id)
+		explicit_elements = explicit_elements and definition.element >= DamageRules.Element.NONE
+	artifact_ids.sort()
+	check(artifact_ids == ["huntian_ling", "meteor", "swords", "taiji_aura", "thunder_orb"] and first.skills.size() == 5 and first.skill_level("swords") == 1, "The run owns exactly the five retained artifacts and starts with swords")
+	var no_enchantments := true
+	for id: String in ids:
+		no_enchantments = no_enchantments and not id.begins_with("element_") and id not in ["skill_slash", "skill_ring", "skill_ghost", "fate_kill_extend"]
+	check(no_enchantments and explicit_elements, "Removed demo skills and player-wide elemental enchantments never appear in the choice pool")
+	check(first.divinity.id == "nezha" and first.divinity.title == "哪吒·三头八臂" and first.fates.is_empty() and first.evolutions.is_empty(), "The initial divinity is separate from artifacts, fate entries and final evolutions")
+	check(first.divinity.category == "passive" and first.divinity.duration_at(1) == 0.0 and first.divinity.cooldown == 0.0 and first.fate_definitions.size() == 1 and first.fate_definitions[0].id == "crit_seal" and not FileAccess.file_exists("res://data/skills/fate_kill_extend.tres"), "Permanent divinity data has no active duration/cooldown and the obsolete kill-extension fate is removed rather than kept as a dead card")
 	first.skills.meteor = 1
 	first.skills.swords = 1
 	ids.clear()
@@ -328,11 +354,11 @@ func check_progression() -> void:
 	for rank in range(1, 6):
 		authored_growth = authored_growth and sword_definition.count_at(rank) == rank + 1 and orb_definition.count_at(rank) == [1, 1, 2, 2, 3][rank - 1]
 	check(authored_growth and orb_definition.element == DamageRules.Element.DARK and orb_definition.kind == DamageRules.Kind.MAGICAL and orb_definition.radius_at(5) > orb_definition.radius_at(1) and orb_definition.visual_scale_at(5) > orb_definition.visual_scale_at(1), "Five ranks grow swords from two to six and dark-magic black holes from one to three with larger coverage")
-	first.skills.slash = 5
+	first.skills.swords = 5
 	ids.clear()
 	for option: Dictionary in first._available_choices():
 		ids.append(option.id)
-	check(not ids.has("skill_slash"), "A max-level skill cannot appear in the choice pool")
+	check(not ids.has("skill_swords"), "A max-level artifact cannot appear as an ordinary rank upgrade")
 	var alias_skill := SkillDefinition.new()
 	alias_skill.id = "arcane_wave"
 	alias_skill.kind = DamageRules.Kind.MAGICAL
@@ -348,7 +374,7 @@ func check_progression() -> void:
 	ids.clear()
 	for option: Dictionary in second._available_choices():
 		ids.append(option.id)
-	check(ids.has("magic_attack") and not ids.has("physical_attack") and not ids.has("independent_attack"), "Attack cards follow a custom alias skill's damage kind, not swordmaster IDs or a zero-damage stance")
+	check(ids.has("magic_attack") and ids.has("physical_attack") and not ids.has("independent_attack"), "A custom damaging artifact enables its damage kind while innate melee still benefits from physical attack")
 	first.reset()
 	first.add_experience(1000)
 	var earned := first.pending_levels
@@ -437,11 +463,11 @@ func check_skill_upgrade_ui() -> void:
 	scene.progression.skills.meteor = 1
 	var options: Array[Dictionary] = []
 	var pool: Array[Dictionary] = scene.progression._available_choices()
-	for desired: String in ["skill_swords", "skill_thunder_orb", "element_fire"]:
+	for desired: String in ["skill_swords", "skill_thunder_orb", "skill_huntian_ling"]:
 		for option: Dictionary in pool:
 			if option.id == desired:
 				options.append(option)
-	check(options.size() == 3 and options[0].description.contains("5 → 6") and options[1].description.contains("2 → 3") and options[1].description.contains("暗") and options[2].description.contains("雷缚珠"), "Upgrade cards expose sword and orb counts, larger coverage and the protected dark element")
+	check(options.size() == 3 and options[0].description.contains("6 → 7") and options[1].description.contains("2 → 3") and options[1].description.contains("暗") and options[2].description.contains("束缚"), "Artifact cards expose effective divinity-adjusted counts, their own element and the status that enables combinations")
 	scene.progression.choices = options
 	scene.progression.pending_levels = 1
 	scene._on_choices(options)
@@ -462,43 +488,324 @@ func check_skill_upgrade_ui() -> void:
 	scene.hud._choice_buttons[1].pressed.emit()
 	check(scene.state == "playing" and scene.progression.skill_level("thunder_orb") == 5, "Selecting the new skill card immediately upgrades its real run state and resumes play")
 	# HUD labels intentionally refresh every 80 ms; wait for that existing presentation tick.
-	var hud_updated := await until(func() -> bool: return scene.hud._skill_widgets.size() == 7 and scene.hud._skill_widgets.thunder_orb.title.text.contains("Lv.5"), 0.25)
-	check(hud_updated, "The fifth HUD slot reflects the selected skill rank on its normal presentation refresh")
+	var hud_updated := await until(func() -> bool: return scene.hud._skill_widgets.size() == 6 and scene.hud._skill_widgets.thunder_orb.title.text.contains("Lv.5"), 0.25)
+	check(hud_updated, "One divinity and five artifact slots reflect the selected rank on the normal HUD refresh")
 
-func check_active_skills() -> void:
+func check_divinity() -> void:
 	await prepare(false)
-	var target := enemy_at(Vector3(0, 0.04, -1.5))
+	var attack: float = scene.player.stats.physical_attack
+	var speed: float = scene.player.stats.attack_speed
+	var definition: SkillDefinition = scene.progression.divinity
+	check(definition.id == "nezha" and scene.progression.artifact_count("swords") == 0 and scene.progression.artifact_count("huntian_ling") == 0 and scene.storm.blades.is_empty() and scene.storm.ribbon.is_empty(), "The permanent artifact bonus does not unlock either artifact or instantiate locked attacks")
+	var no_active_state: bool = not scene.player.has_method("request_divinity")
+	for property: Dictionary in scene.player.get_property_list():
+		no_active_state = no_active_state and property.name not in ["divinity_active", "divinity_aura", "divinity_requested", "divinity_left", "divinity_cooldown", "divinity_extension"]
+	check(no_active_state and not InputMap.has_action("divinity") and not InputMap.has_action("ghost_state") and not InputMap.has_action("skill") and scene.find_child("DivinityAura", true, false) == null and scene.find_child("GhostAura", true, false) == null, "The artifact-only passive needs no character transformation, aura, activation, timed state or obsolete combat input")
+	var effective_growth := true
+	var other_artifacts_unchanged := true
+	var previous_ids: Array[int] = []
+	for rank in range(1, 6):
+		scene.progression.skills.swords = rank
+		scene.progression.skills.huntian_ling = rank
+		effective_growth = effective_growth and scene.progression.artifact_count("swords") == rank + 2 and scene.progression.artifact_count("swords", rank) == rank + 2 and scene.progression.artifact_count("huntian_ling") == rank + 3 and scene.progression.artifact_count("huntian_ling", rank) == rank + 3
+		for id: String in ["meteor", "thunder_orb", "taiji_aura"]:
+			other_artifacts_unchanged = other_artifacts_unchanged and scene.progression.artifact_count(id, rank) == scene.progression.skill(id).count_at(rank) and scene.progression.artifact_count(id) == 0
+		scene.storm.refresh_skills()
+		var ids := blade_ids()
+		var preserved: bool = ids.size() == rank + 2 and scene.storm.slots.size() == rank + 2
+		for instance_id: int in previous_ids:
+			preserved = preserved and ids.has(instance_id)
+		check(preserved, "Rank %d creates exactly %d real sword instances while preserving the existing lower-rank blades" % [rank, rank + 2])
+		previous_ids = ids
+	check(effective_growth and scene.progression.artifact_count("swords", 0) == 0 and scene.progression.artifact_count("huntian_ling", 0) == 0 and scene.progression.artifact_count("unknown_artifact", 5) == 0, "One quantity entry computes swords 3..7 and sash targets 4..8, but zero ranks and unknown artifacts remain zero")
+	check(other_artifacts_unchanged, "The same divinity leaves seal, orb and formation counts unchanged at every rank and never unlocks them")
+	scene.progression.divinity = null
+	var unmodified := true
+	for rank in range(1, 6):
+		unmodified = unmodified and scene.progression.artifact_count("swords", rank) == rank + 1 and scene.progression.artifact_count("huntian_ling", rank) == rank + 2
+	var unrelated := SkillDefinition.new()
+	unrelated.id = "unrelated_divinity_fixture"
+	scene.progression.divinity = unrelated
+	check(unmodified and scene.progression.artifact_count("swords", 1) == 2 and scene.progression.artifact_count("huntian_ling", 1) == 3, "Absent or unrelated divinities use the existing unmodified Resource counts")
+	scene.progression.divinity = definition
+	check(scene.progression.skill("swords").count_at(5) == 6 and scene.progression.skill("huntian_ling").count_at(5) == 7 and scene.player.stats.physical_attack == attack and scene.player.attack_speed == speed and scene.player.stats.range_multiplier == 1.0, "Applying the extra sword and chain target does not mutate authored Resources, damage, speed or global range")
+	check(scene.player.combo_total == 3 and scene.player.hitbox.scale == Vector3.ONE and scene.player.skill_hitbox.scale == Vector3.ONE and scene.player.visual.scale == Vector3.ONE and is_equal_approx(scene.player._attack_reach(), 2.25), "The artifact bonus keeps the existing model, three basic moves, directional and round hitbox scales, and normal melee reach")
+	check(await until(func() -> bool: return scene.hud._skill_widgets.divinity.status.text.contains("飞剑+1") and scene.hud._skill_widgets.divinity.status.text.contains("绫链+1"), 0.2) and scene.hud._skill_widgets.divinity.binding.text.contains("常驻"), "The existing HUD describes the two permanent artifact bonuses without an activation key")
+
+	await prepare(true)
+	var target := enemy_at(Vector3(0, 0.04, -1.5), 10000.0)
+	var strikes: Array[int] = [0]
+	var count_strike: Callable = func(_heavy: bool) -> void: strikes[0] += 1
+	scene.player.swing_active.connect(count_strike)
+	check(await until(func() -> bool: return scene.player.attack_count >= 3, 3.0), "Default automatic melee reaches its existing third native move against a real enemy")
+	scene.player.auto_attack = false
+	await until(func() -> bool: return not scene.player.attacking, 1.1)
+	scene.player.swing_active.disconnect(count_strike)
+	check(strikes[0] == 3 and target.health == 9909.0 and scene.hit_count == 3 and scene.player.combo_total == 3, "The ordinary three-move combo resolves exactly three real strikes for 25, 28 and 38 damage, without changing to the retained multi-hit clips")
+
+	await prepare(true)
+	target = enemy_at(Vector3(0, 0.04, -2.4), 10000.0)
+	await physics_wait(0.65)
+	check(scene.player.attack_count == 0 and target.health == 10000.0, "A target at 2.4 metres remains outside the unchanged 2.25-metre automatic melee trigger")
+	target.position.z = -2.1
+	check(await until(func() -> bool: return target.health < 10000.0, 0.8), "An enemy at 2.1 metres triggers and receives real automatic melee inside the original reach")
+	check(Vector2(scene.player.position.x, scene.player.position.z).length() < 0.01, "Automatic acquisition does not move the player toward the target")
+
+	await prepare(false)
+	var front := enemy_at(Vector3(0, 0.04, -2.1), 10000.0)
+	var behind := enemy_at(Vector3(0, 0.04, 2.1), 10000.0)
+	var side := enemy_at(Vector3(2.5, 0.04, 0), 10000.0)
+	var beyond := enemy_at(Vector3(0, 0.04, -3.0), 10000.0)
 	await physics_wait(0.04)
-	press("skill")
-	await physics_wait(0.08)
-	check(scene.player.using_skill and scene.player.skill_cooldown > 0.0, "The configured skill input starts the authored ring attack and cooldown")
-	await physics_wait(0.18)
-	check(target.health == 500.0, "The active skill windup does not apply premature damage")
-	await physics_wait(0.55)
-	check(target.health == 445.0 and scene.hit_count == 1, "One real ring release applies one 55-damage physical hit")
-	var count: int = scene.player.attack_count
-	for attempt in 8:
-		press("skill")
-	await physics_wait(0.15)
-	check(scene.player.attack_count == count, "Active-skill input spam is rejected during cooldown")
+	scene.player._begin_attack()
+	await physics_wait(0.7)
+	check(front.health == 9975.0 and behind.health == 10000.0 and side.health == 10000.0 and beyond.health == 10000.0 and scene.hit_count == 1, "Basic melee keeps original directional contact: the forward victim is hit once, rear, lateral and beyond-edge victims are untouched")
+
 	await prepare(false)
-	scene.player.request_ghost()
-	check(not scene.player.ghost_active and scene.player.ghost_cooldown == 0.0, "The locked ghost skill cannot be activated")
-	scene.progression.skills.ghost = 1
-	press("ghost_state")
-	await physics_wait(0.03)
-	check(scene.player.ghost_active and scene.player.ghost_left > 7.8 and scene.player.ghost_cooldown > 23.8, "Unlocked ghost uses the configured eight-second duration and 24-second cooldown")
-	check(scene.player.stats.physical_attack == 25.0 and scene.player.damage_multiplier == 1.5, "Ghost is a temporary combat multiplier rather than a permanent stat mutation")
-	var original_cooldown: float = scene.player.ghost_cooldown
-	scene.player.ghost_cooldown = 0.0
-	scene.player.ghost_left = 3.0
-	press("ghost_state")
-	await physics_wait(0.03)
-	check(scene.player.ghost_active and scene.player.ghost_cooldown == 0.0 and scene.player.ghost_left <= 3.0 and scene.player.ghost_left > 2.8, "Repeated G during an active ghost buff neither spends a ready cooldown nor refreshes its duration")
-	scene.player.ghost_cooldown = original_cooldown
-	scene.player.ghost_left = 0.03
-	await physics_wait(0.12)
-	check(not scene.player.ghost_active and not scene.player.ghost_requested and scene.player.damage_multiplier == 1.0 and scene.player.ghost_cooldown > 0.0, "Ghost expires and leaves its cooldown in force")
+	scene.progression.skills.taiji_aura = 1
+	scene.aura.refresh_skills()
+	check(is_equal_approx(scene.aura.radius, 2.6) and is_equal_approx(scene.storm.RANGE, 8.5) and is_equal_approx(scene.progression.skill("huntian_ling").radius_at(1), 8.5) and scene.orbs.TARGET_RANGE == 10.0, "The artifact-only passive leaves formation, sword, sash and orb ranges at their authored values")
+	scene.player.stats.range_multiplier = 1.5
+	scene.player._refresh_range()
+	scene.aura.refresh_skills()
+	check(scene.player.hitbox.scale == Vector3(1.5, 1, 1.5) and scene.player.skill_hitbox.scale == Vector3(1.5, 1, 1.5) and is_equal_approx(scene.player._attack_reach(), 3.375) and is_equal_approx(scene.aura.radius, 3.9), "Only an actual range stat upgrade scales the existing melee and artifact geometry, without a hidden two-times character multiplier")
+	divinity_checks_completed = true
+
+func check_combat_statuses() -> void:
+	await prepare(false)
+	scene.storm.set_physics_process(false)
+	scene.orbs.set_physics_process(false)
+	scene.aura.set_physics_process(false)
+	for id: String in scene.progression.skills:
+		scene.progression.skills[id] = 1
+	scene.player.stats.magic_attack = 100.0
+	scene.player.stats.physical_attack = 100.0
+	scene.player.stats.independent_attack = 100.0
+	var target := enemy_at(Vector3(0, 0.04, -4), 10000.0)
+	check(ArenaEnemy.STATUS_RULES.size() == 8 and not target.apply_status("unknown", scene.player, "meteor") and not target.apply_status("burn", scene.player, "meteor", 0.0), "The receiver exposes exactly eight authored abnormal states and rejects invalid or zero-duration applications")
+	scene.player.deal_damage(target, DamageRules.Kind.PHYSICAL, 1.0)
+	check(target.statuses.is_empty(), "Innate melee has no inherited element or automatic artifact status")
+	var initial_health := target.health
+	for pair: Array in [["burn", "meteor"], ["bleed", "swords"], ["poison", "thunder_orb"]]:
+		check(target.apply_status(pair[0], scene.player, pair[1], 1.0), "The shared receiver accepts " + pair[0])
+	target.advance_statuses(0.25)
+	check(target.health == initial_health, "Periodic states cannot damage before their half-second tick")
+	target.apply_status("burn", scene.player, "meteor", 1.0)
+	target.apply_status("burn", scene.player, "meteor", 1.0, 1.0, true)
+	check(not target.get_status("burn").secondary, "An equal-strength propagated burn cannot overwrite a primary burn's chaining provenance")
+	target.advance_statuses(0.25)
+	check(target.health == initial_health - 46.0, "Burn, bleed and poison share damage arithmetic and refreshing burn does not postpone its pending tick")
+	scene.toggle_pause()
+	var remaining: float = target.get_status("burn").remaining
+	var paused_health := target.health
+	target.advance_statuses(1.0)
+	check(target.health == paused_health and target.get_status("burn").remaining == remaining, "Native pause also freezes explicit abnormal-state advancement")
+	scene.toggle_pause()
+	target.advance_statuses(2.0)
+	check(target.health == initial_health - 92.0 and target.statuses.is_empty(), "A long update catches up only each status's finite lifetime and removes expired states")
+	var expired_health := target.health
+	target.advance_statuses(5.0)
+	check(target.health == expired_health, "Expired periodic states never leave a delayed damage callback")
+	check(target.apply_status("bind", scene.player, "huntian_ling", 2.0) and not target.apply_status("bind", scene.player, "huntian_ling", 2.0), "An active hard control cannot refresh itself into a permanent lock")
+	target._state = ArenaEnemy.State.CHARGE
+	target._state_left = 3.0
+	target._direction = Vector3.FORWARD
+	target._physics_process(0.02)
+	check(Vector2(target.velocity.x, target.velocity.z).length() < 0.01, "Bind stops actual native enemy movement without changing movement stats")
+	target.remove_status("bind")
+	check(not target.apply_status("bind", scene.player, "huntian_ling"), "Consumed hard control grants the authored recovery window")
+	target.advance_statuses(1.01)
+	check(target.apply_status("bind", scene.player, "huntian_ling"), "Control may apply again after its recovery window, not before")
+	for id: String in ["freeze", "stun"]:
+		target._state = ArenaEnemy.State.WINDUP
+		target._circle_warning(target.global_position, 1.0)
+		check(target.apply_status(id, scene.player, "huntian_ling") and not is_instance_valid(target._warning) and target._state == ArenaEnemy.State.RECOVER, id + " interrupts the actual attack warning instead of merely changing a UI label")
+		target.remove_status(id)
+	var elite := enemy_at(Vector3(4, 0.04, -4), 10000.0)
+	elite.elite = true
+	var boss_target := enemy_at(Vector3(-4, 0.04, -4), 10000.0)
+	boss_target.boss = true
+	check(elite.apply_status("bind", scene.player, "huntian_ling", 2.0) and is_equal_approx(elite.get_status("bind").remaining, 0.7), "Elite abnormal control duration is reduced to 35 percent")
+	check(not boss_target.apply_status("bind", scene.player, "huntian_ling") and not boss_target.apply_status("freeze", scene.player, "huntian_ling") and not boss_target.apply_status("stun", scene.player, "huntian_ling") and boss_target.apply_status("burn", scene.player, "meteor"), "Bosses reject all hard controls but still accept damaging abnormal states")
+	var dodger := enemy_at(Vector3(6, 0.04, -4), 10000.0)
+	dodger.stats.dodge_chance = 1.0
+	var missed: Dictionary = scene.player.deal_fabao_damage(dodger, "meteor")
+	check(missed.get("actual", 0.0) == 0.0 and dodger.statuses.is_empty(), "Dodged artifact hits cannot apply their inherent abnormal state")
+	var secondary := enemy_at(Vector3(7, 0.04, -4), 10000.0)
+	scene.player.deal_fabao_damage(secondary, "meteor", -1.0, false, false, Vector3.ZERO, false, true)
+	check(secondary.health < 10000.0 and secondary.statuses.is_empty(), "A secondary artifact hit can deal damage but cannot reapply statuses or recurse")
+
+	await prepare(false)
+	scene.storm.set_physics_process(false)
+	scene.orbs.set_physics_process(false)
+	scene.aura.set_physics_process(false)
+	scene.progression.skills.taiji_aura = 1
+	scene.progression.skills.swords = 1
+	scene.player.stats.magic_attack = 100.0
+	target = enemy_at(Vector3(0, 0.04, -4), 10000.0)
+	var neighbors: Array[ArenaEnemy] = []
+	for offset: Vector3 in [Vector3(0.7, 0, 0), Vector3(-1.1, 0, 0), Vector3(0, 0, 1.5), Vector3(2.5, 0, 0)]:
+		neighbors.append(enemy_at(target.global_position + offset, 10000.0))
+	scene.player.deal_fabao_damage(target, "taiji_aura")
+	scene.player.deal_fabao_damage(target, "taiji_aura")
+	check(target.has_status("shock") and target.get_status("shock").charges == 3 and scene.player.reaction_count == 0, "Bagua applies three shock charges but cannot conduct its own repeated light pulses")
+	scene.player.deal_fabao_damage(target, "swords")
+	check(scene.player.reaction_count == 1 and target.get_status("shock").charges == 2 and neighbors[0].health == 9970.0 and neighbors[1].health == 9970.0 and neighbors[2].health == 9970.0 and neighbors[3].health == 10000.0, "A different artifact consumes one shock charge and conducts to only the nearest three enemies")
+	scene.player.deal_fabao_damage(target, "swords")
+	check(scene.player.reaction_count == 1 and target.get_status("shock").charges == 2, "Rapid repeated contacts respect the per-victim 0.35-second reaction gate")
+	for charge in 2:
+		target.advance_statuses(0.35)
+		scene.player.deal_fabao_damage(target, "swords")
+	var clean_secondaries := true
+	for neighbor: ArenaEnemy in neighbors:
+		clean_secondaries = clean_secondaries and neighbor.statuses.is_empty()
+	check(scene.player.reaction_count == 3 and not target.has_status("shock") and clean_secondaries and neighbors[0].health == 9910.0, "All three shock charges are finite and conducted damage cannot seed another status chain")
+	target.apply_status("shock", scene.player, "taiji_aura")
+	target.health = 1.0
+	scene.player.deal_fabao_damage(target, "swords")
+	check(target.dead and target.statuses.is_empty() and scene.player.reaction_count == 4 and neighbors[0].health == 9880.0, "A lethal cross-artifact hit still conducts the prior shock snapshot once and never reapplies states to its corpse")
+
+	await prepare(false)
+	scene.storm.set_physics_process(false)
+	scene.progression.skills.meteor = 1
+	scene.progression.skills.swords = 1
+	scene.player.stats.magic_attack = 100.0
+	target = enemy_at(Vector3(0, 0.04, -4), 10000.0)
+	neighbors.clear()
+	for offset: Vector3 in [Vector3(0.7, 0, 0), Vector3(-1.1, 0, 0), Vector3(0, 0, 1.5), Vector3(2.5, 0, 0)]:
+		neighbors.append(enemy_at(target.global_position + offset, 10000.0))
+	target.apply_status("freeze", scene.player, "huntian_ling")
+	scene.player.deal_fabao_damage(target, "meteor")
+	check(not target.has_status("freeze") and target.has_status("burn") and scene.player.reaction_count == 1 and target.health == 9837.0 and neighbors[0].health == 9965.0 and neighbors[2].health == 9965.0 and neighbors[3].health == 10000.0, "Fire breaks ice once, damages the primary victim plus at most three neighbors and leaves its own burn")
+	check(neighbors[0].statuses.is_empty(), "Secondary ice shards cannot spread the triggering artifact's burn")
+	neighbors[3].apply_status("freeze", scene.player, "huntian_ling")
+	scene.player.deal_fabao_damage(neighbors[3], "swords")
+	check(not neighbors[3].has_status("freeze") and scene.player.reaction_count == 2, "A fixed-damage sword also breaks an existing freeze through the shared reaction path")
+	var frozen_victim := enemy_at(Vector3(-6, 0.04, -4), 1.0)
+	var frost_neighbor := enemy_at(Vector3(-5, 0.04, -4), 10000.0)
+	frozen_victim.apply_status("freeze", scene.player, "huntian_ling")
+	scene.player.deal_fabao_damage(frozen_victim, "meteor")
+	check(frozen_victim.dead and frozen_victim.statuses.is_empty() and frost_neighbor.health == 9965.0 and scene.player.reaction_count == 3, "A lethal fire hit retains the frozen contact snapshot and shatters into neighbors without burning the corpse")
+
+	await prepare(false)
+	target = enemy_at(Vector3(0, 0.04, -4), 100.0)
+	neighbors.clear()
+	for offset: Vector3 in [Vector3(2, 0, 0), Vector3(-1, 0, 0), Vector3(0, 0, -1), Vector3(2.7, 0, 0)]:
+		neighbors.append(enemy_at(target.global_position + offset, 10000.0))
+	target.apply_status("curse", scene.player, "thunder_orb")
+	for pair: Array in [["burn", "meteor"], ["bleed", "swords"], ["poison", "thunder_orb"]]:
+		target.apply_status(pair[0], scene.player, pair[1], 3.0)
+	scene.player.deal_damage(target, DamageRules.Kind.FIXED, 100.0)
+	var inherited := true
+	for index in 3:
+		for id: String in ["burn", "bleed", "poison"]:
+			inherited = inherited and neighbors[index].has_status(id) and neighbors[index].get_status(id).secondary and is_equal_approx(neighbors[index].get_status(id).remaining, 3.0)
+		inherited = inherited and not neighbors[index].has_status("curse")
+	check(target.dead and target.statuses.is_empty() and inherited and neighbors[3].statuses.is_empty(), "Cursed death copies only primary damaging states to three nearby victims with their remaining lifetime, never the curse")
+	var witness := enemy_at(Vector3(4.7, 0.04, -4), 10000.0)
+	neighbors[0].apply_status("curse", scene.player, "thunder_orb")
+	scene.player.deal_damage(neighbors[0], DamageRules.Kind.FIXED, 10000.0)
+	check(witness.statuses.is_empty() and neighbors[3].statuses.is_empty(), "A newly cursed recipient cannot propagate already-secondary burns, bleeds or poisons into a second generation")
+
+	await prepare(false)
+	var burning := enemy_at(Vector3(0, 0.04, -3), 1.0)
+	var next := enemy_at(Vector3(2, 0.04, -3.8), 10000.0)
+	var last := enemy_at(Vector3(-1.8, 0.04, -4), 10000.0)
+	burning.apply_status("burn", scene.player, "meteor", 4.0)
+	scene.progression.skills.huntian_ling = 1
+	check(await until(func() -> bool: return scene.storm.ribbon_hits == 3, 3.2), "The existing sash completes three real contacts while carrying a burning victim's state")
+	scene.storm.ribbon_cooldown = 100.0
+	check(burning.dead and next.has_status("burn") and last.has_status("burn") and next.get_status("burn").secondary and last.get_status("burn").secondary and float(last.get_status("burn").remaining) < 4.0, "The same sash carries burn from a lethally hit first victim to later contacts without restoring its lifetime or creating a new spell")
+	status_checks_completed = true
+
+func check_fates_and_evolution() -> void:
+	var run := RunProgression.new()
+	run.reset()
+	var gated := true
+	for option: Dictionary in run._available_choices():
+		gated = gated and option.id not in ["fate_crit_seal", "evolution_swords_pierce", "fate_kill_extend"]
+	check(gated, "Seal fate and sword evolution are unavailable before their artifact prerequisites")
+	run.skills.meteor = 1
+	var fate_card: Dictionary = {}
+	for option: Dictionary in run._available_choices():
+		if option.id == "fate_crit_seal":
+			fate_card = option
+	check(not fate_card.is_empty(), "Learning the seal opens its critical-trigger fate")
+	run.pending_levels = 1
+	run.choices = [fate_card]
+	run.skills.meteor = 0
+	check(not run.choose(0) and run.pending_levels == 1 and not run.has_fate("crit_seal"), "Choice resolution rechecks a stale fate's prerequisites")
+	run.skills.meteor = 1
+	check(run.choose(0) and run.has_fate("crit_seal"), "The existing choice resolver acquires a valid fate exactly once")
+	run.skills.swords = 5
+	run.skills.huntian_ling = 2
+	var premature := false
+	for option: Dictionary in run._available_choices():
+		premature = premature or option.id == "evolution_swords_pierce"
+	check(not premature, "Max-rank swords alone do not meet the required rank-three sash combination")
+	run.skills.huntian_ling = 3
+	var evolution_card: Dictionary = {}
+	for option: Dictionary in run._available_choices():
+		if option.id == "evolution_swords_pierce":
+			evolution_card = option
+	run.pending_levels = 1
+	run.choices = [evolution_card]
+	check(not evolution_card.is_empty() and run.choose(0) and run.has_evolution("swords_pierce"), "Five-rank swords plus three-rank sash unlock a separately owned final evolution")
+	var unique := true
+	for option: Dictionary in run._available_choices():
+		unique = unique and option.id not in ["fate_crit_seal", "evolution_swords_pierce"]
+	check(unique, "Already-owned fates and evolutions leave the pool instead of stacking their rule twice")
+	run.pending_levels = 1
+	run.choices = [{"id": "element_fire", "category": "element", "element": 1, "value": 999.0}]
+	check(not run.choose(0) and run.pending_levels == 1, "An injected removed enchantment card cannot reintroduce player-wide elements")
+	run.choices = [{"id": "fate_kill_extend", "category": "fate"}]
+	check(not run.choose(0) and run.pending_levels == 1 and not run.has_fate("kill_extend"), "An injected obsolete duration-extension fate cannot be selected for a permanent passive")
+	var physical: float = run.stats.physical_attack
+	run.choices = [{"id": "physical_attack", "category": "stat", "value": 99999.0}]
+	check(run.choose(0) and run.stats.physical_attack == physical + 5.0, "Choice resolution derives stat values from current authored growth rather than trusting injected card values")
+	run.free()
+
+	await prepare(false)
+	scene.storm.set_physics_process(false)
+	scene.progression.skills.meteor = 1
+	scene.storm.meteor_cooldown = 100.0
+	scene.player.stats.crit_chance = 1.0
+	var target := enemy_at(Vector3(0, 0.04, -4), 10000.0)
+	scene.player.deal_damage(target, DamageRules.Kind.PHYSICAL, 1.0)
+	check(scene.storm.meteor_count == 0, "A critical melee hit without its fate cannot cast an unlocked seal")
+	scene.progression.fates.crit_seal = 1
+	scene.player.deal_damage(target, DamageRules.Kind.PHYSICAL, 1.0)
+	check(scene.storm.meteor_count == 1 and scene.storm.meteors.size() == 1 and scene.storm.meteors[0].secondary and scene.storm.meteor_cooldown == 100.0, "Critical-seal fate requests the existing secondary seal executor without replacing its autonomous cooldown")
+	scene.player.deal_damage(target, DamageRules.Kind.PHYSICAL, 1.0)
+	check(scene.storm.meteor_count == 1, "The critical fate's shared cooldown prevents repeated-contact cast spam")
+	scene.player.fate_cooldown = 0.0
+	scene.player.deal_fabao_damage(target, "meteor", 1.0, false, false, Vector3.ZERO, false, true)
+	check(scene.storm.meteor_count == 1 and target.statuses.is_empty(), "A secondary critical seal cannot recursively invoke its fate or apply burn")
+	check(scene.storm.request_fate_cast(target) and not scene.storm.request_fate_cast(target) and scene.storm.meteors.size() == 2, "Autonomous and fate seals share the existing two-flight concurrency limit")
+
+	await prepare(false)
+	scene.progression.skills.swords = 5
+	scene.progression.skills.huntian_ling = 3
+	scene.storm.ribbon_cooldown = 100.0
+	var unbound := enemy_at(Vector3(0, 0.04, -3), 10000.0)
+	var bound := enemy_at(Vector3(0, 0.04, -5), 10000.0)
+	bound.apply_status("bind", scene.player, "huntian_ling", 10.0)
+	scene.storm.refresh_skills()
+	var original_ids := blade_ids()
+	await until(func() -> bool: return scene.storm.active_swords > 0, 0.4)
+	check(scene.storm.evolved_strikes == 0, "High ranks and a bound victim alone do not grant an unchosen evolution")
+	scene.progression.evolutions.swords_pierce = 1
+	check(await until(func() -> bool: return scene.storm.evolved_strikes > 0 and bound.health < 10000.0, 2.0), "The selected evolution routes the existing swords directly into actual piercing strikes against bound targets")
+	check(blade_ids() == original_ids and scene.storm.blades.size() == 7 and is_instance_valid(unbound), "Evolution changes attack routing while reusing the same seven divinity-adjusted sword instances")
+	# Count a single bound victim: a piercing pass may legitimately hit the other
+	# fixture target too, which is not an attack-frequency violation.
+	unbound.position = Vector3(0, 0.04, -13)
+	await physics_wait(0.2)
+	var hits_before: int = scene.storm.sword_hits
+	await physics_wait(2.0)
+	var extra_hits: int = scene.storm.sword_hits - hits_before
+	check(extra_hits > 0 and extra_hits <= 63 and scene.storm.active_swords <= 7, "Seven evolved swords retain minimum travel and contact timing instead of oscillating into hundreds of hits per second (%d hits in two seconds)" % extra_hits)
+	fate_checks_completed = true
 
 func check_incoming_damage() -> void:
 	await prepare(false)
@@ -546,15 +853,16 @@ func check_pickups_and_choices() -> void:
 	scene.player.deal_damage(enemy, DamageRules.Kind.FIXED, 100.0, 0)
 	await physics_wait(0.03)
 	gem = scene.drops.get_child(0) as ExperienceGem
-	scene.player.skill_cooldown = 2.0
+	scene.progression.skills.meteor = 1
+	scene.storm.meteor_cooldown = 2.0
 	scene.director.enabled = true
 	gem.global_position = scene.player.global_position + Vector3(1.4, 0.2, 0)
 	check(await until(func() -> bool: return scene.state == "choosing", 1.0), "Collecting enough real XP opens the upgrade state")
 	check(get_tree().paused and scene.hud.choice_panel.visible and scene.progression.choices.size() == 3 and scene.progression.pending_levels >= 2, "A multi-level pickup pauses the battle and displays three choices")
 	var time: float = scene.director.elapsed
-	var cooldown: float = scene.player.skill_cooldown
+	var cooldown: float = scene.storm.meteor_cooldown
 	await physics_wait(0.3)
-	check(scene.director.elapsed == time and scene.player.skill_cooldown == cooldown, "Upgrade pause freezes the wave clock and active cooldown")
+	check(scene.director.elapsed == time and scene.storm.meteor_cooldown == cooldown and scene.progression.artifact_count("swords", 1) == 3, "Upgrade pause freezes the wave clock and artifact cooldown without changing the permanent artifact bonus")
 	scene.toggle_pause()
 	check(scene.state == "choosing" and get_tree().paused and scene.hud.choice_panel.visible, "The pause action cannot bypass a required upgrade")
 	var previous_level: int = scene.progression.level
@@ -602,7 +910,8 @@ func check_pause() -> void:
 	await prepare(false)
 	var target := enemy_at(Vector3(0, 0.04, -5.0), 500.0, "ranged")
 	scene.progression.skills.meteor = 1
-	scene.player.request_skill()
+	scene.storm.meteor_cooldown = 100.0
+	scene.player._begin_attack()
 	await physics_wait(0.12)
 	scene.storm._call_meteor(target)
 	target._launch_projectile(Vector3.RIGHT, 6.0, 1.0)
@@ -614,7 +923,7 @@ func check_pause() -> void:
 	scene.director._spawn_timer.start(0.2)
 	scene.toggle_pause()
 	var time: float = scene.director.elapsed
-	var cooldown: float = scene.player.skill_cooldown
+	var cooldown: float = scene.storm.meteor_cooldown
 	var animation_time: float = scene.player.animation.current_animation_position
 	var spawn_time: float = scene.director._spawn_timer.time_left
 	var meteor_time: float = scene.storm.meteors[0].left
@@ -625,13 +934,13 @@ func check_pause() -> void:
 	await physics_wait(0.35)
 	Input.action_release("move_right")
 	check(scene.state == "paused" and get_tree().paused and scene.hud.pause_panel.visible, "The pause action opens its native modal and pauses the tree")
-	check(scene.director.elapsed == time and scene.director._spawn_timer.time_left == spawn_time and scene.player.skill_cooldown == cooldown and scene.player.animation.current_animation_position == animation_time, "Pause freezes wave timers, active cooldown and authored animation together")
+	check(scene.director.elapsed == time and scene.director._spawn_timer.time_left == spawn_time and scene.storm.meteor_cooldown == cooldown and scene.player.animation.current_animation_position == animation_time and scene.progression.artifact_count("swords", 1) == 3, "Pause freezes wave timers, artifact cooldown and the ordinary attack animation without changing the artifact bonus")
 	check(scene.storm.meteors[0].left == meteor_time and scene.storm.meteors[0].node.global_position.is_equal_approx(meteor_position) and projectile.global_position.is_equal_approx(projectile_position), "Pause freezes in-flight meteor state, its tween and enemy projectiles")
 	check(scene.player.global_position.is_equal_approx(position), "Movement input cannot advance the paused player")
 	await capture("pause")
 	scene.toggle_pause()
 	await physics_wait(0.15)
-	check(scene.state == "playing" and not get_tree().paused and scene.director.elapsed > time and scene.player.skill_cooldown < cooldown, "Resume restarts simulation and cooldown from their frozen state")
+	check(scene.state == "playing" and not get_tree().paused and scene.director.elapsed > time and scene.storm.meteor_cooldown < cooldown and scene.progression.artifact_count("swords", 1) == 3, "Resume restarts simulation and artifact cooldown while preserving the permanent artifact bonus")
 
 func blade_ids() -> Array[int]:
 	var ids: Array[int] = []
@@ -667,10 +976,8 @@ func check_zhaotian_seal() -> void:
 	check(definition.title == "罗宣·照天印" and definition.resource_path.ends_with("zhaotian_seal.tres") and not FileAccess.file_exists("res://data/skills/meteor.tres"), "The legacy meteor resource is replaced, not duplicated; the stable run-state ID is preserved")
 	check(definition.kind == DamageRules.Kind.MAGICAL and definition.element == DamageRules.Element.FIRE and is_equal_approx(definition.coefficient_at(5), 2.304), "All five seal ranks retain the existing fixed-fire magical damage progression")
 	scene.progression.skills.meteor = 1
+	scene.storm.meteor_cooldown = 100.0
 	scene.player.stats.magic_attack = 80.0
-	scene.player.stats.element = DamageRules.Element.DARK
-	scene.player.stats.element_bonus[0] = 0.2
-	scene.player.stats.element_bonus[3] = 0.8
 	var target := enemy_at(Vector3(0, 0.04, -4.0), 10000.0)
 	target.stats.resistances = [0.3, 0.0, 0.0, -0.5]
 	var nearby := enemy_at(Vector3(2.2, 0.04, -4.0), 10000.0)
@@ -693,7 +1000,7 @@ func check_zhaotian_seal() -> void:
 	check(target.health == 10000.0 and not seal.landed and not seal.animation.is_playing(), "Suspended charge and accelerating descent cannot deal damage or fracture early")
 	var landed := await until(func() -> bool: return seal.landed, 0.35)
 	check(landed and seal.global_position.distance_to(flight.position) < 0.001 and scene.storm.meteors.is_empty(), "One physics-owned contact snaps the seal to the ground and retires its flight")
-	check(target.health == 9908.0 and nearby.health < 10000.0 and outside.health == 10000.0 and scene.storm.meteor_hits == 2, "Ground impact deals 92 fire-magic damage through shared resistance math and never hits beyond its boundary")
+	check(target.health == 9928.0 and nearby.health < 10000.0 and outside.health == 10000.0 and scene.storm.meteor_hits == 2, "Ground impact deals 72 fire-magic damage through shared resistance math and never hits beyond its boundary")
 	check(nearby._push.x > 0.0 and nearby._stagger_left > 0.0, "The stamp reuses enemy heavy-hit stagger and pushes outward from its contact point")
 	var contact_health := target.health
 	var hits: int = scene.storm.meteor_hits
@@ -713,13 +1020,14 @@ func check_zhaotian_seal() -> void:
 	check(not shard.transform.is_equal_approx(paused_pose) and scene.storm.meteor_hits == hits and target.health == contact_health, "The same visible chunks scatter and tumble without a second damage event")
 	await physics_wait(1.15)
 	check(not is_instance_id_valid(seal_id) and target.health == contact_health, "All seal chunks, six particle layers and bound effects expire after their animation")
-	check(scene.hud._skill_widgets.meteor.title.text.contains("照天印") and scene.hud._skill_widgets.meteor.binding.text.contains("罗宣"), "HUD uses the short seal name and its owner without widening the skill row")
+	check(scene.hud._skill_widgets.meteor.title.text.contains("照天印") and scene.hud._skill_widgets.meteor.binding.text.contains("火") and scene.hud._skill_widgets.meteor.binding.text.contains("灼烧") and scene.hud._skill_widgets.meteor.title.tooltip_text.contains("罗宣·照天印"), "HUD keeps the compact artifact element/status visible and preserves its complete owner title in the tooltip")
 	# Native owners must cancel both the in-flight and the post-contact phases.
 	scene.storm._call_meteor(target)
 	var cancelled: Node3D = scene.storm.meteors[0].node
 	var cancelled_id := cancelled.get_instance_id()
 	var warning_id: int = scene.storm.meteors[0].warning.get_instance_id()
 	scene.storm.reset()
+	scene.storm.meteor_cooldown = 100.0
 	await physics_wait(1.0)
 	check(not is_instance_id_valid(cancelled_id) and not is_instance_id_valid(warning_id) and target.health == contact_health, "Reset cancels the falling seal, its warning and its pending damage")
 	scene.storm._call_meteor(target)
@@ -733,16 +1041,16 @@ func check_zhaotian_seal() -> void:
 
 func check_auxiliary_skills() -> void:
 	await prepare(false)
-	var target := enemy_at(Vector3(0, 0.04, -4.0), 10000.0)
-	scene.storm.on_swing(false)
 	await physics_wait(0.04)
 	check(scene.storm.volley_count == 0 and scene.storm.meteor_count == 0 and scene.storm.blades.is_empty(), "Neither locked passive can launch or instantiate an active sword formation")
 	scene.progression.skills.meteor = 1
-	scene.storm.meteor_chance = 1.0
-	scene.storm.on_swing(false)
-	check(scene.storm.meteor_count == 1 and scene.storm.volley_count == 0 and scene.storm.blades.is_empty(), "Meteor unlocks independently without unlocking swords")
+	await physics_wait(0.15)
+	check(scene.storm.meteor_count == 0 and scene.storm.meteor_cooldown == 0.0, "The seal does not consume its autonomous period without an eligible target")
+	var target := enemy_at(Vector3(0, 0.04, -4.0), 10000.0)
+	await until(func() -> bool: return scene.storm.meteor_count == 1, 0.3)
+	check(scene.storm.meteor_count == 1 and scene.storm.volley_count == 0 and scene.storm.blades.is_empty(), "The seal launches autonomously without a basic swing or unlocked swords")
 	await physics_wait(1.1)
-	check(scene.storm.meteor_hits > 0 and target.health < 10000.0 and scene.storm.meteor_rolls == 1 and scene.storm.meteor_count == 1, "A real meteor lands without recursively rolling auxiliary skills")
+	check(scene.storm.meteor_hits > 0 and target.health < 10000.0 and scene.storm.meteor_count == 1, "A real seal lands without recursively casting another artifact")
 	await prepare(false)
 	target = enemy_at(Vector3(0, 0.04, -10.0), 10000.0)
 	target.stats.physical_defense = 10000.0
@@ -750,7 +1058,7 @@ func check_auxiliary_skills() -> void:
 	scene.progression.skills.swords = 1
 	scene.storm.refresh_skills()
 	var original_ids := blade_ids()
-	check(original_ids.size() == 2 and scene.storm.slots.size() == 2, "Unlocking swords instantiates exactly two source-asset blades")
+	check(original_ids.size() == 3 and scene.storm.slots.size() == 3, "Unlocking swords instantiates exactly three source-asset blades including the divinity bonus")
 	var reused := true
 	for blade: Node3D in scene.storm.blades:
 		reused = reused and blade.scene_file_path == "res://assets/weapons/astral_edge/astral_edge.tscn" and blade.fins.size() == 2 and is_instance_valid(blade.wake) and is_instance_valid(blade.ambient)
@@ -766,13 +1074,13 @@ func check_auxiliary_skills() -> void:
 	Input.action_release("move_right")
 	await physics_wait(0.25)
 	check(horizontal_formation() and scene.storm.slots[0].position.distance_to(first_position) > 0.2, "The horizontal ring orbits while following player movement and turning")
-	await capture("swords-two-orbiting")
+	await capture("swords-three-orbiting")
 	target.position = Vector3(0, 0.04, -4.0)
 	target.hide()
 	await physics_wait(0.3)
 	check(scene.storm.volley_count == 0, "Hidden enemies inside range do not trigger the automatic swords")
 	target.show()
-	var launched := await until(func() -> bool: return scene.storm.active_swords == 2, 0.4)
+	var launched := await until(func() -> bool: return scene.storm.active_swords == 3, 0.4)
 	check(launched and scene.player.attack_count == 0, "Swords launch at an in-range enemy with auto-attack disabled and no swing event")
 	if not launched:
 		return
@@ -809,12 +1117,20 @@ func check_auxiliary_skills() -> void:
 	# Shared camera/normal-hit throttling must not swallow these contact flashes.
 	scene._impact_left = 10.0
 	var upgraded_ids: Array[int] = []
+	var upgraded_originals: Dictionary = {}
 	for attempt in 12:
 		if attempt == 4:
+			var current_coefficients: Dictionary = {}
+			for flight: Dictionary in scene.storm.flights:
+				current_coefficients[flight.blade.get_instance_id()] = flight.coefficient
 			scene.progression.skills.swords = 5
 			scene.storm.refresh_skills()
 			upgraded_ids = blade_ids()
-			check(upgraded_ids.size() == 6 and upgraded_ids[0] == original_ids[0] and upgraded_ids[1] == original_ids[1], "Upgrading during flight adds blades up to six without replacing either original sword")
+			check(upgraded_ids.size() == 7 and upgraded_ids[0] == original_ids[0] and upgraded_ids[1] == original_ids[1] and upgraded_ids[2] == original_ids[2], "Upgrading during flight adds blades up to seven without replacing any of the three original swords")
+			var unchanged := current_coefficients.size() == 3
+			for flight: Dictionary in scene.storm.flights:
+				unchanged = unchanged and is_equal_approx(flight.coefficient, current_coefficients[flight.blade.get_instance_id()])
+			check(unchanged, "A sword rank upgrade preserves the already-committed leg's damage snapshot")
 		for frame in 36:
 			await get_tree().physics_frame
 			peak = maxi(peak, scene.storm.active_swords)
@@ -823,6 +1139,8 @@ func check_auxiliary_skills() -> void:
 				trail_seen = trail_seen or flight.blade.history.size() >= 3
 				trails_aligned = trails_aligned and flight.blade.wake.global_transform.is_equal_approx(Transform3D.IDENTITY)
 				var blade_id: int = flight.blade.get_instance_id()
+				if attempt >= 4 and original_ids.has(blade_id) and is_equal_approx(flight.coefficient, scene.progression.coefficient("swords")):
+					upgraded_originals[blade_id] = true
 				var point: Vector3 = flight.follow.global_position
 				var previous: Dictionary = strike_samples.get(blade_id, {})
 				var speed := 0.0 if previous.is_empty() else point.distance_to(previous.point) * Engine.physics_ticks_per_second
@@ -846,6 +1164,7 @@ func check_auxiliary_skills() -> void:
 					var offset: Vector3 = effect.flash.global_position - effect.global_position
 					var toward_camera: Vector3 = (scene.camera.global_position - effect.global_position).normalized()
 					surface_flashes = surface_flashes and absf(offset.length() - 0.5) < 0.001 and offset.normalized().dot(toward_camera) > 0.99
+	check(upgraded_originals.size() == 3, "All three original swords read the new rank-five coefficient on their next autonomous attack legs")
 	check(continuous and scene.storm.chain_count > 0 and scene.player.attack_count == 0, "Automatic swords continuously chain real passes without any basic attacks or swing refresh")
 	check(trail_seen and trails_aligned and impact_seen, "Flight reuses correctly aligned world-space trails and hits instantiate the existing impact scene")
 	check(impact_seen and surface_flashes, "Impact flash geometry sits half a unit toward the camera, outside the victim body")
@@ -855,7 +1174,7 @@ func check_auxiliary_skills() -> void:
 	check(impact_events[0] == scene.storm.sword_hits - initial_hits and impact_events[0] > 0 and directional_flashes[0], "Every actual stab hit emits one matching directional flash even while shared hit accents are throttled")
 	scene.feedback.child_entered_tree.disconnect(record_impact)
 	await capture("swords-battlefield")
-	check(peak > 0 and peak <= 6 and scene.storm.blades.size() == 6, "Automatic volleys never create more than the six physical blades")
+	check(peak > 0 and peak <= 7 and scene.storm.blades.size() == 7, "Automatic volleys never create more than the seven physical blades including the divinity bonus")
 	check(scene.storm.sword_hits > 0 and target.health < 10000.0 and scene.storm.meteor_count == 0, "Fixed-damage swords hit through high double defense without unlocking meteor")
 	target.position = Vector3(0, 0.04, -12.0)
 	var distant_health := target.health
@@ -864,18 +1183,18 @@ func check_auxiliary_skills() -> void:
 	Input.action_release("move_right")
 	await until(func() -> bool: return scene.storm.active_swords == 0, 4.0)
 	await physics_wait(0.25)
-	check(scene.storm.active_swords == 0 and blade_ids() == upgraded_ids and horizontal_formation() and target.health == distant_health, "Leaving range returns the same six swords to the moving horizontal ring and stops damage")
-	await capture("swords-six-orbiting")
+	check(scene.storm.active_swords == 0 and blade_ids() == upgraded_ids and horizontal_formation() and target.health == distant_health, "Leaving range returns the same seven swords to the moving horizontal ring and stops damage")
+	await capture("swords-seven-orbiting")
 	target.global_position = scene.player.global_position + Vector3.FORWARD * 10.0
 	scene.player.stats.range_multiplier = 1.5
 	scene.progression.skills.meteor = 1
-	scene.storm.meteor_chance = 1.0
+	scene.storm.meteor_cooldown = 100.0
 	check(await until(func() -> bool: return scene.storm.active_swords > 0, 0.4), "Increasing the existing range stat automatically reacquires a previously out-of-range enemy")
 	await physics_wait(1.4)
-	check(target.health < distant_health and scene.player.attack_count == 0 and scene.storm.meteor_rolls == 0, "Autonomous sword damage never rolls even an unlocked guaranteed meteor")
+	check(target.health < distant_health and scene.player.attack_count == 0 and scene.storm.meteor_count == 0, "Without its fate entry autonomous sword damage cannot bypass the seal's cooldown")
 	target.queue_free()
 	check(await until(func() -> bool: return scene.storm.active_swords == 0, 1.2), "Freed targets safely release all returning swords")
-	check(horizontal_formation() and blade_ids() == upgraded_ids, "Target loss retains all six original sword instances and restores their idle visual state")
+	check(horizontal_formation() and blade_ids() == upgraded_ids, "Target loss retains all seven original sword instances and restores their idle visual state")
 	await physics_wait(0.5)
 	var cleared_impacts := true
 	for effect in scene.feedback.get_children():
@@ -921,26 +1240,22 @@ func check_huntian_ling() -> void:
 	for option: Dictionary in scene.progression._available_choices():
 		if option.id == "skill_huntian_ling":
 			options.append(option)
-	check(options.size() == 1 and options[0].description.contains("连锁目标 3"), "The existing choice pool offers Huntian Ling with explicit chain count")
+	check(options.size() == 1 and options[0].description.contains("连锁目标 4"), "The existing choice pool offers Huntian Ling with the divinity-adjusted chain count")
 	scene.progression.choices = options
 	scene.progression.pending_levels = 1
 	scene._on_choices(options)
 	scene.hud._choice_buttons[0].pressed.emit()
 	check(scene.progression.skill_level("huntian_ling") == 1 and scene.state == "playing", "The connected upgrade button unlocks Huntian Ling without another loadout system")
 	scene.player.stats.magic_attack = 100.0
-	scene.player.stats.element = DamageRules.Element.FIRE
-	scene.player.stats.element_bonus[0] = 0.8
 	scene.player.stats.life_steal = 0.1
 	scene.player.health = 40.0
 	for target in [first, second, third]:
 		target.stats.magic_defense = 25.0
-	scene.progression.skills.ghost = 1
-	scene.player.request_ghost()
 	scene.progression.skills.meteor = 1
-	scene.storm.meteor_chance = 1.0
+	scene.storm.meteor_cooldown = 100.0
 	var received: Array[Dictionary] = []
-	var record: Callable = func(target: Node3D, _point: Vector3, result: Dictionary, _heavy: bool, source: String) -> void:
-		if source == "混天绫":
+	var record: Callable = func(target: Node3D, _point: Vector3, result: Dictionary, _heavy: bool, _source: String) -> void:
+		if result.get("skill_id", "") == "huntian_ling" and not result.get("secondary", false):
 			received.append({"id": target.get_instance_id(), "damage": result.damage, "element": result.element})
 	scene.player.hit_confirmed.connect(record)
 	var launched := await until(func() -> bool: return not scene.storm.ribbon.is_empty(), 0.3)
@@ -975,12 +1290,14 @@ func check_huntian_ling() -> void:
 	scene.progression.skills.huntian_ling = 5
 	scene.player.stats.range_multiplier = 1.4
 	scene.storm.refresh_skills()
-	check(flight.visual.get_instance_id() == visual_id and flight.remaining == 2 and is_equal_approx(flight.coefficient, 0.88) and is_equal_approx(flight.jump_range, 4.6), "Mid-flight upgrades keep the same sash and the original three-target damage/range snapshot")
+	check(flight.visual.get_instance_id() == visual_id and flight.remaining == 3 and is_equal_approx(flight.coefficient, 0.88) and is_equal_approx(flight.jump_range, 4.6), "Mid-flight upgrades keep the same sash and its original four-target damage/range snapshot including the divinity bonus")
+	scene.hud._update_skill("huntian_ling", scene.storm.ribbon_cooldown, true, 0.0)
+	check(scene.hud._skill_widgets.huntian_ling.status.text == "本轮4 · 下轮8", "The sash HUD distinguishes its current four-target cast snapshot from next cast's upgraded eight-target capacity")
 	await until(func() -> bool: return scene.storm.ribbon.phase == "strike", 0.8)
 	var entry: Vector3 = flight.follow.global_position
 	await physics_wait(0.06)
 	check(visual.coiling and flight.follow.global_position.distance_to(entry) > 0.2 and received.is_empty(), "The real head keeps moving around its victim before the contact beat, instead of pausing for a whole-body morph")
-	check(await until(func() -> bool: return scene.storm.ribbon_hits == 3, 3.0), "A single physical sash completes three sequential real contacts")
+	check(await until(func() -> bool: return scene.storm.ribbon_hits == 3, 3.0), "A single physical sash completes the three available sequential contacts without requiring its full four-target allowance")
 	var body_targets := 0
 	for target in [first, second, third]:
 		for bone in visual.spine_bones:
@@ -1000,8 +1317,8 @@ func check_huntian_ling() -> void:
 	for result: Dictionary in received:
 		accurate = accurate and result.damage == 70 and result.element == DamageRules.Element.NONE and not ids.has(result.id)
 		ids.append(result.id)
-	check(accurate and first.health == 9930.0 and second.health == 9930.0 and third.health == 9930.0 and isolated.health == 10000.0, "Each chained victim loses 70 HP once through shared magic defense math; fire enchantment, ghost and the remote cluster add no phantom hits")
-	check(scene.player.health > 40.0 and scene.storm.meteor_rolls == 0 and scene.storm.sword_hits == 0, "Chain hits reuse life steal and never recursively roll swords or the guaranteed meteor")
+	check(accurate and first.health == 9930.0 and second.health == 9930.0 and third.health == 9930.0 and isolated.health == 10000.0, "Each chained victim loses 70 HP once through shared magic defense math with no player-wide element inheritance or remote phantom hits")
+	check(scene.player.health > 40.0 and scene.storm.meteor_count == 0 and scene.storm.sword_hits == 0, "Chain hits reuse life steal without casting other artifacts when no fate is selected")
 	check(is_instance_valid(visual) and visual.get_instance_id() == visual_id and first._stagger_left > 0.0, "The same deformed model attacks every target and reuses the enemy hit/stagger animation")
 	var same_emitters := true
 	for i in visual.emitters.size():
@@ -1020,7 +1337,7 @@ func check_huntian_ling() -> void:
 	check(received.size() == 3, "The following body and retraction do not cause duplicate damage")
 	scene.player.hit_confirmed.disconnect(record)
 	await until(func() -> bool: return scene.hud._skill_widgets.huntian_ling.title.text.contains("Lv.5"), 0.2)
-	check(scene.hud._skill_widgets.huntian_ling.title.text.contains("混天绫") and scene.hud._skill_widgets.huntian_ling.binding.text.contains("哪吒"), "HUD names Nezha and the sash without forcing the full title into the compact slot")
+	check(scene.hud._skill_widgets.huntian_ling.title.text.contains("混天绫") and scene.hud._skill_widgets.huntian_ling.binding.text.contains("束缚") and scene.hud._skill_widgets.huntian_ling.title.tooltip_text.contains("哪吒·混天绫"), "HUD exposes the sash's binding mechanic and retains Nezha's full owner title in the tooltip")
 	var offers_maxed := false
 	for option: Dictionary in scene.progression._available_choices():
 		offers_maxed = offers_maxed or option.id == "skill_huntian_ling"
@@ -1075,15 +1392,32 @@ func check_huntian_ling() -> void:
 	await until(func() -> bool: return scene.storm.ribbon.is_empty(), 1.4)
 	check(scene.storm.ribbon_hits == 1, "A fleeing target outside range cancels its pending hit")
 
+	# Put one more reachable enemy than the allowance in every rank fixture:
+	# actual path contacts, not just Resource arithmetic, must enforce the cap.
+	for rank in range(1, 6):
+		await prepare(false)
+		var candidates: Array[ArenaEnemy] = []
+		for i in range(rank + 4):
+			candidates.append(enemy_at(Vector3((i % 3 - 1) * 1.4, 0.04, -2.8 - floorf(float(i) / 3.0) * 1.4), 10000.0))
+		scene.progression.skills.huntian_ling = rank
+		var began: bool = await until(func() -> bool: return scene.storm.ribbon_casts == 1, 0.3)
+		scene.storm.ribbon_cooldown = 100.0
+		var completed: bool = began and await until(func() -> bool: return scene.storm.ribbon.is_empty(), 7.5)
+		var damaged_targets := 0
+		for candidate: ArenaEnemy in candidates:
+			if candidate.health < 10000.0:
+				damaged_targets += 1
+		check(completed and scene.storm.ribbon_casts == 1 and scene.storm.ribbon_hits == rank + 3 and damaged_targets == rank + 3, "Rank %d's single real sash visits exactly %d distinct targets, returns cleanly and leaves the extra candidate untouched" % [rank, rank + 3])
+
 	await prepare(false)
 	var rate := Engine.physics_ticks_per_second
 	Engine.physics_ticks_per_second = 30
-	for i in 7:
+	for i in 9:
 		enemy_at(Vector3((i % 3 - 1) * 1.4, 0.04, -2.8 - floorf(float(i) / 3.0) * 1.4), 10000.0)
 	scene.progression.skills.huntian_ling = 5
 	await until(func() -> bool: return scene.storm.ribbon_casts == 1, 0.3)
 	scene.storm.ribbon_cooldown = 100.0
-	check(await until(func() -> bool: return scene.storm.ribbon_hits == 7, 6.0), "At 30 physics ticks, rank five still resolves exactly seven sequential native contacts")
+	check(await until(func() -> bool: return scene.storm.ribbon_hits == 8, 6.0), "At 30 physics ticks, rank five still resolves all eight sequential native contacts including the divinity bonus")
 	Engine.physics_ticks_per_second = rate
 	var cancelled_id: int = scene.storm.ribbon.visual.get_instance_id()
 	scene.restart()
@@ -1113,20 +1447,14 @@ func check_thunder_orbs() -> void:
 	await physics_wait(0.15)
 	check(scene.orbs.orbs.is_empty() and scene.orbs.cast_count == 0, "The locked black-hole passive cannot fire")
 	scene.player.stats.magic_attack = 80.0
-	scene.player.stats.element = DamageRules.Element.FIRE
-	scene.player.stats.element_bonus[0] = 0.8
-	scene.player.stats.element_bonus[2] = 0.9
-	scene.player.stats.element_bonus[3] = 0.2
 	scene.player.stats.life_steal = 0.1
 	scene.player.health = 50.0
 	target.stats.resistances = [-0.2, 0.0, -0.5, 0.4]
-	scene.progression.skills.ghost = 1
-	scene.player.request_ghost()
 	scene.progression.skills.thunder_orb = 1
 	scene.orbs.refresh_skills()
 	var received: Array[Dictionary] = []
-	var record_hit: Callable = func(_target: Node3D, _point: Vector3, result: Dictionary, _heavy: bool, source: String) -> void:
-		if source == "雷缚珠":
+	var record_hit: Callable = func(_target: Node3D, _point: Vector3, result: Dictionary, _heavy: bool, _source: String) -> void:
+		if result.get("skill_id", "") == "thunder_orb" and not result.get("secondary", false):
 			received.append(result.duplicate())
 	scene.player.hit_confirmed.connect(record_hit)
 	var launched := await until(func() -> bool: return scene.orbs.cast_count == 1, 0.3)
@@ -1144,9 +1472,9 @@ func check_thunder_orbs() -> void:
 	check(not orbit_visual.basis.is_equal_approx(initial_basis), "The imported orbit animation actually rotates the modeled accretion layers")
 	check(orb._trail.emitting and not orb._infall.emitting and not orb._mist.emitting, "Three native particle layers exist and inward particles wait for contact")
 	var landed := await until(func() -> bool: return not received.is_empty(), 2.0)
-	check(landed and received[0].element == DamageRules.Element.DARK and received[0].damage == 38 and scene.player.ghost_active, "Dark magic reads dark resistance and magic attack, ignoring fire enchantment, light bonuses and ghost")
+	check(landed and received[0].element == DamageRules.Element.DARK and received[0].damage == 29, "The orb's own dark element reads dark resistance and magic attack without a player enchantment")
 	check(landed and scene.player.health > 50.0 and target._stagger_left == 0.0 and target._push == Vector3.ZERO, "Dark ticks reuse life steal without knockback or hard stagger")
-	check(scene.storm.volley_count == 0 and scene.storm.meteor_rolls == 0, "Black holes never recursively trigger other passives")
+	check(scene.storm.volley_count == 0 and scene.storm.meteor_count == 0, "An isolated orb cannot create a locked artifact through recursion")
 	var anchor: Vector3 = orb.global_position
 	var impact_radius: float = orb.current_radius
 	check(orb.phase == orb.Phase.WELL and orb.speed == 0.0 and impact_radius < orb.radius, "First native contact stops the projectile and starts expansion")
@@ -1183,7 +1511,7 @@ func check_thunder_orbs() -> void:
 		var health_before := target.health
 		scene.orbs.contact(target, second)
 		scene.orbs.contact(target, third)
-		check(is_equal_approx(health_before - target.health, 138.0) and target._push == Vector3.ZERO, "Two orbs deal independent dark damage without outward push")
+		check(is_equal_approx(health_before - target.health, 104.0) and target._push == Vector3.ZERO, "Two orbs deal independent dark damage without outward push")
 	scene.player.hit_confirmed.disconnect(record_hit)
 	scene.orbs.cooldown_left = 100.0
 	await until(func() -> bool: return orb.phase == orb.Phase.COLLAPSE, 4.1)
@@ -1236,9 +1564,6 @@ func check_taiji_aura() -> void:
 	var target := enemy_at(Vector3(0, 0.04, -1.8), 10000.0)
 	var outside := enemy_at(Vector3(2.72, 0.04, 0), 10000.0)
 	scene.player.stats.magic_attack = 80.0
-	scene.player.stats.element = DamageRules.Element.DARK
-	scene.player.stats.element_bonus[2] = 0.2
-	scene.player.stats.element_bonus[3] = 0.8
 	scene.player.stats.life_steal = 0.1
 	scene.player.health = 50.0
 	target.stats.resistances = [0.0, 0.0, 0.3, -0.5]
@@ -1246,7 +1571,7 @@ func check_taiji_aura() -> void:
 	for option: Dictionary in scene.progression._available_choices():
 		if option.id == "skill_taiji_aura":
 			options.append(option)
-	check(options.size() == 1 and options[0].title.contains("太上老君") and options[0].description.contains("光"), "The existing choice pool offers the mythology-named aura with its protected light element")
+	check(options.size() == 1 and options[0].title.contains(definition.title) and options[0].description.contains("光"), "The existing choice pool offers the mythology-named formation with its own light element")
 	scene.progression.choices = options
 	scene.progression.pending_levels = 1
 	scene._on_choices(options)
@@ -1258,13 +1583,13 @@ func check_taiji_aura() -> void:
 	var glyphs := aura._model.find_child("Bagua", true, false) as Node3D
 	var initial_basis := glyphs.basis
 	var received: Array[Dictionary] = []
-	var record_hit: Callable = func(_target: Node3D, _point: Vector3, result: Dictionary, _heavy: bool, source: String) -> void:
-		if source == "太极图":
+	var record_hit: Callable = func(_target: Node3D, _point: Vector3, result: Dictionary, _heavy: bool, _source: String) -> void:
+		if result.get("skill_id", "") == "taiji_aura" and not result.get("secondary", false):
 			received.append(result.duplicate())
 	scene.player.hit_confirmed.connect(record_hit)
 	var landed := await until(func() -> bool: return not received.is_empty(), 1.6)
-	check(landed and received[0].element == DamageRules.Element.LIGHT and received[0].damage == 40, "Aura pulses use magic attack and light resistance through DamageRules, ignoring dark enchantment")
-	check(scene.player.attack_count == 0 and scene.storm.meteor_rolls == 0 and scene.storm.volley_count == 0 and scene.orbs.cast_count == 0, "The aura works without attacks and cannot recursively trigger other passives")
+	check(landed and received[0].element == DamageRules.Element.LIGHT and received[0].damage == 31, "Aura pulses use their own light element and the defender's light resistance through shared DamageRules")
+	check(scene.player.attack_count == 0 and scene.storm.meteor_count == 0 and scene.storm.volley_count == 0 and scene.orbs.cast_count == 0, "The aura works without attacks and cannot recursively create locked artifacts")
 	check(scene.player.health > 50.0 and target._stagger_left == 0.0 and target._push == Vector3.ZERO, "Aura hits retain shared life steal without knockback or hard stagger")
 	check(outside.health == 10000.0 and aura.hit_count == 1, "Touching the native cylinder outside the visible 2.6m boundary does not deal damage")
 	check(aura._model.scene_file_path.ends_with("taiji_aura.glb") and aura._model.find_children("*", "MeshInstance3D", true, false).size() == 12 and aura._animation.is_playing() and not glyphs.basis.is_equal_approx(initial_basis), "The real formation loads the Blender GLB, 12 material batches and native counter-rotation")
@@ -1272,7 +1597,7 @@ func check_taiji_aura() -> void:
 	for emitter: GPUParticles3D in aura._emitters:
 		particle_slots += emitter.amount
 	check(aura._emitters.size() == 4 and particle_slots == 160 and aura._pulse_particles.one_shot, "Four native particle layers share reusable emitters with a bounded 160-slot budget")
-	check(scene.hud._skill_widgets.size() == 7 and scene.hud._skill_widgets.taiji_aura.title.text.contains("太极图") and scene.hud._skill_widgets.taiji_aura.binding.text.contains("太上老君"), "The sixth HUD slot exposes the aura ability and its mythological owner without a new HUD system")
+	check(scene.hud._skill_widgets.size() == 6 and scene.hud._skill_widgets.taiji_aura.title.text.contains(definition.title.get_slice("·", 1)) and scene.hud._skill_widgets.taiji_aura.title.tooltip_text.contains(definition.title), "The existing HUD exposes the authored formation beside one divinity and the other four artifacts")
 	check(aura._boundary.material_override.shader.resource_path == "res://shaders/astral_ring.gdshader" and not aura._energy_meshes.is_empty() and aura._energy_meshes[0].get_surface_override_material(0).shader.resource_path == "res://assets/weapons/astral_edge/energy.gdshader", "Aura materials reuse the existing range and energy shaders")
 	var hits_before: int = aura.hit_count
 	await physics_wait(0.2)
@@ -1419,13 +1744,18 @@ func check_crowd_hits() -> void:
 		var angle := TAU * float(index) / 40.0
 		crowd.append(enemy_at(Vector3(cos(angle) * 1.9, 0.04, sin(angle) * 1.9), 500.0))
 	await physics_wait(0.04)
-	scene.player.request_skill()
+	# Exercise the preserved authored round-hit animation as an isolated fixture;
+	# the normal game and the artifact-only divinity never select this combo.
+	scene.player.current_move = DuelFighter.DIVINITY_COMBO[0]
+	scene.player.attacking = true
+	scene.player.attack_direction = Vector3.FORWARD
+	scene.player.animation.play(scene.player.current_move.animation)
 	await physics_wait(0.8)
 	var damaged := 0
 	for target: ArenaEnemy in crowd:
-		if target.health == 445.0:
+		if target.health == 460.0:
 			damaged += 1
-	check(damaged == 40 and scene.hit_count == 40, "A native ring attack hits all 40 overlapping enemies once, not just 32")
+	check(damaged == 40 and scene.hit_count == 80, "The retained round-animation fixture reaches all 40 overlapping enemies exactly once per strike without granting that combo to the player")
 	check(scene.hud.popups.size() <= scene.hud.MAX_POPUPS and scene.shake_power <= 0.06, "Crowd hit feedback stays bounded instead of multiplying shake and popups indefinitely")
 	await prepare(false)
 	crowd.clear()
@@ -1433,6 +1763,7 @@ func check_crowd_hits() -> void:
 		var angle := TAU * float(index) / 40.0
 		crowd.append(enemy_at(Vector3(cos(angle), 0.04, -5.0 + sin(angle)), 500.0))
 	scene.progression.skills.meteor = 1
+	scene.storm.meteor_cooldown = 100.0
 	await physics_wait(0.04)
 	scene.storm._call_meteor(crowd[0])
 	await physics_wait(1.1)
@@ -1443,13 +1774,13 @@ func check_restart() -> void:
 	var target := enemy_at(Vector3(0, 0.04, -4.0), 10000.0, "ranged")
 	scene.progression.skills.swords = 1
 	scene.progression.skills.meteor = 1
-	scene.progression.skills.ghost = 1
 	scene.progression.skills.thunder_orb = 5
+	scene.progression.fates.crit_seal = true
+	scene.progression.evolutions.swords_pierce = true
+	scene.storm.meteor_cooldown = 100.0
 	scene.storm.refresh_skills()
 	scene.orbs.refresh_skills()
-	scene.storm.on_swing(true)
 	scene.storm._call_meteor(target)
-	scene.player.request_ghost()
 	target._launch_projectile(Vector3.RIGHT, 6.0, 1.0)
 	var enemy_id := target.get_instance_id()
 	var old_feedback_id: int = scene.feedback.get_instance_id()
@@ -1467,11 +1798,13 @@ func check_restart() -> void:
 	scene.director._spawn_timer.stop()
 	check(scene.state == "playing" and not get_tree().paused and scene.ready_to_play, "Restart synchronously returns the existing scene to play")
 	check(scene.enemies.get_child_count() == 0 and scene.drops.get_child_count() == 0 and scene.director.get_alive_count() == 0 and scene.director._pending.is_empty(), "Restart clears all enemy, projectile, drop and scheduled-spawn owners")
-	check(scene.storm.active_swords == 0 and scene.storm.meteors.is_empty() and scene.storm.blades.is_empty(), "Restart removes in-flight swords, meteor state and the now-locked formation")
+	check(scene.storm.active_swords == 0 and scene.storm.meteors.is_empty() and scene.storm.evolved_strikes == 0, "Restart removes old in-flight swords, seal state and evolved strike counters")
 	check(not old_orbs.is_empty() and scene.orbs.orbs.is_empty() and scene.orbs.cast_count == 0 and scene.orbs.cooldown_left == 0.0 and scene.progression.skill_level("thunder_orb") == 0, "Restart clears the new periodic skill, its cast counters, cooldown and locked rank")
 	check(scene.progression.level == 1 and scene.progression.xp == 0 and scene.progression.pending_levels == 0 and scene.progression.choices.is_empty(), "Restart clears level, XP and every pending choice")
-	check(scene.player.health == scene.player.stats.max_health and not scene.player.dead and not scene.player.ghost_active and scene.player.skill_cooldown == 0.0 and scene.player.ghost_cooldown == 0.0 and scene.defeat_count == 0 and scene.hit_count == 0, "Restart resets health, death, buffs, cooldowns and run counters")
+	check(scene.player.health == scene.player.stats.max_health and not scene.player.dead and scene.player.combo_total == 3 and scene.player.hitbox.scale == Vector3.ONE and is_equal_approx(scene.player._attack_reach(), 2.25) and scene.defeat_count == 0 and scene.hit_count == 0, "Restart resets health and run counters while keeping three ordinary moves and original melee reach")
+	check(scene.progression.fates.is_empty() and scene.progression.evolutions.is_empty() and scene.progression.skill_level("swords") == 1 and scene.progression.skills.size() == 5 and scene.progression.artifact_count("swords") == 3 and scene.progression.artifact_count("huntian_ling") == 0, "Restart clears fate/evolution ownership and restores the three-sword passive without unlocking the sash")
 	await physics_wait(0.05)
+	check(scene.storm.blades.size() == 3, "The first live update after restart instantiates exactly the three starting swords")
 	var freed := not is_instance_id_valid(enemy_id) and not is_instance_id_valid(old_feedback_id)
 	for blade_id: int in old_blades:
 		freed = freed and not is_instance_id_valid(blade_id)
@@ -1536,15 +1869,16 @@ func check_short_load() -> void:
 	scene.player.health = 100000.0
 	scene.progression.skills.swords = 5
 	scene.progression.skills.meteor = 1
-	scene.progression.skills.ghost = 1
 	scene.progression.skills.thunder_orb = 5
 	scene.progression.skills.taiji_aura = 5
 	scene.progression.skills.huntian_ling = 5
+	scene.progression.fates.crit_seal = 1
+	scene.progression.evolutions.swords_pierce = 1
+	scene.player.stats.crit_chance = 0.75
 	scene.player.stats.cooldown_multiplier = 0.4
 	scene.storm.refresh_skills()
 	scene.orbs.refresh_skills()
 	scene.aura.refresh_skills()
-	scene.player.request_ghost()
 	for index in performance_enemies:
 		var angle := TAU * float(index) / float(performance_enemies)
 		var radius := 2.5 + float(index % 6) * 0.8
@@ -1558,15 +1892,13 @@ func check_short_load() -> void:
 	var load_started := Time.get_ticks_msec()
 	for action: String in ["move_right", "move_up", "move_left", "move_down"]:
 		Input.action_press(action)
-		scene.player.skill_cooldown = 0.0
-		scene.player.request_skill()
 		await physics_wait(1.25)
 		Input.action_release(action)
 	recording = false
 	performance = {
 		"requested": true,
 		"scope": "headless_logic_load_only_not_rendered_fps" if headless else "rendered_short_fixture_not_target_hardware_guarantee",
-		"fixture": "Real AI enemies, six swords, rank-five dark wells, light Taiji aura and a seven-target Huntian sash at minimum cooldown, meteor and ghost unlocked; movement and forced actives; elevated health prevents pauses.",
+		"fixture": "Real AI enemies, all five retained artifacts at minimum cooldown, native elemental statuses, critical-seal fate, evolved swords and Nezha's extra sword/chain target with ordinary three-move melee and 75-percent critical chance; movement and elevated health prevent artificial result pauses.",
 		"requested_enemies": performance_enemies,
 		"remaining_enemies": get_tree().get_nodes_in_group("enemies").size(),
 		"simulation_seconds": 5.0,
@@ -1583,12 +1915,15 @@ func check_short_load() -> void:
 		"aura_hits": scene.aura.hit_count,
 		"ribbon_casts": scene.storm.ribbon_casts,
 		"ribbon_hits": scene.storm.ribbon_hits,
+		"evolved_strikes": scene.storm.evolved_strikes,
+		"reaction_count": scene.player.reaction_count,
 		"max_ribbon_particle_slots": max_ribbon_particle_slots,
 		"max_ribbon_spine_bones": max_ribbon_spine_bones,
 		"max_ribbon_history_points": max_ribbon_history_points,
 	}
 	check(scene.state == "playing" and not get_tree().paused, "The short crowd-load fixture completes without a state lock or unexpected upgrade pause")
-	check(max_active_swords <= 6 and max_active_meteors <= 2 and max_active_orbs <= 9, "Crowd-load auxiliary concurrency stays within its authored limits")
+	check(max_active_swords <= 7 and max_active_meteors <= 2 and max_active_orbs <= 9, "Crowd-load auxiliary concurrency stays within seven swords, two seals and nine orbs")
+	check(scene.storm.evolved_strikes > 0 and scene.player.reaction_count > 0 and max_active_swords <= 7 and max_active_meteors <= 2 and max_active_orbs <= 9, "The full-system crowd fixture executes actual evolution and elemental reactions within the divinity-adjusted artifact concurrency limits")
 	check(scene.aura._emitters.size() == 4 and scene.aura.pulse_count >= 8 and scene.aura.hit_count > 0, "The full-load formation keeps four emitters and continues real damage beside all existing skills")
 	check(scene.storm.ribbon_casts > 0 and scene.storm.ribbon_hits > 0 and max_ribbon_particle_slots <= 340 and max_ribbon_spine_bones == 65 and max_ribbon_history_points <= 384, "The full-load sash stays within 340 particle slots, one 65-bone skin and 384 history samples")
 	await capture("crowd-%d" % performance_enemies)

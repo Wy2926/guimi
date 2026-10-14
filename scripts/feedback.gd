@@ -46,14 +46,9 @@ func prewarm(fighter: DuelFighter) -> void:
 	AudioServer.set_bus_mute(1, true)
 	fighter.attack_direction = fighter.facing
 	slash(fighter)
-	slash(fighter, "rise", true, 0)
-	slash(fighter, "thrust", true, 0)
-	var aura := create_ghost_aura(fighter)
-	ghost_transition(fighter, true)
+	slash(fighter, "rise")
+	slash(fighter, "down", false, 0, true)
 	impact(Vector3(0, 1, 0), Vector3.FORWARD, true, true)
-	skill_charge(fighter)
-	skill_spin(fighter)
-	skill_release(fighter)
 	storm_activate(Vector3(0, 0.08, 0))
 	storm_muzzle(Vector3(0, 2.3, 0))
 	storm_hit(Vector3(0, 1.0, 0), Vector3.FORWARD)
@@ -64,8 +59,6 @@ func prewarm(fighter: DuelFighter) -> void:
 	seal.shatter()
 	seal_impact(Vector3.ZERO, 1.0, seal)
 	await get_tree().create_timer(1.1, false).timeout
-	if is_instance_valid(aura):
-		aura.free()
 	AudioServer.set_bus_mute(1, was_muted)
 
 func slash(fighter: DuelFighter, style: String = "horizontal", ghost: bool = false, strike: int = 0, finisher: bool = false) -> void:
@@ -73,7 +66,7 @@ func slash(fighter: DuelFighter, style: String = "horizontal", ghost: bool = fal
 	# Reuse the existing crescent material on differently oriented native quads.
 	sound("spin" if style == "spin" else "swish", fighter.global_position, -3.0 if ghost else -1.5, (1.06 if ghost else 0.82) + strike * 0.07)
 	var pivot := Node3D.new()
-	pivot.name = "GhostSlash" if ghost else "ComboSlash"
+	pivot.name = "DivinitySlash" if ghost else "ComboSlash"
 	add_child(pivot)
 	pivot.global_position = fighter.global_position + Vector3.UP * (1.05 if style == "rise" else 1.2)
 	pivot.rotation.y = atan2(fighter.attack_direction.x, fighter.attack_direction.z)
@@ -104,21 +97,22 @@ func slash(fighter: DuelFighter, style: String = "horizontal", ghost: bool = fal
 			sweep = 0.0
 	if finisher:
 		diameter += 0.6
-	diameter *= fighter.stats.range_multiplier
+	var reach := fighter.stats.range_multiplier
+	diameter *= reach
 	var layers := 3 if ghost and finisher else 2
 	for layer in layers:
 		var arc := MeshInstance3D.new()
 		var quad := QuadMesh.new()
-		quad.size = Vector2(1.2 + layer * 0.3, diameter) if style == "thrust" else Vector2.ONE * (diameter + layer * 0.28)
+		quad.size = Vector2((1.2 + layer * 0.3) * reach, diameter) if style == "thrust" else Vector2.ONE * (diameter + layer * 0.28)
 		arc.mesh = quad
 		arc.rotation = plane
 		arc.rotation.z += layer * (0.1 if ghost else 0.045)
 		arc.position.y = layer * 0.045
 		if style == "thrust":
-			arc.position.z = 0.85
+			arc.position.z = 0.85 * reach
 		elif style == "down":
-			arc.position.z = 0.8
-			arc.position.x = 0.18
+			arc.position.z = 0.8 * reach
+			arc.position.x = 0.18 * reach
 		arc.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		var material := ShaderMaterial.new()
 		material.shader = preload("res://shaders/slash.gdshader")
@@ -140,136 +134,15 @@ func slash(fighter: DuelFighter, style: String = "horizontal", ghost: bool = fal
 	elif style == "rise":
 		tween.tween_property(pivot, "position:y", pivot.position.y + 0.5, duration)
 	elif style == "thrust":
-		tween.tween_property(pivot, "position", pivot.position + fighter.attack_direction * 0.75, duration)
+		tween.tween_property(pivot, "position", pivot.position + fighter.attack_direction * (0.75 * reach), duration)
 	tween.tween_interval(duration)
 	tween.chain().tween_callback(pivot.queue_free)
-	var sparks := _burst(fighter.global_position + fighter.attack_direction * 1.15 + Vector3.UP * 1.05, fighter.attack_direction + Vector3.UP * 0.25, 18 if ghost else 12, Color("ff3977") if ghost else Color("ffc55e"), 0.32, 3.8 if ghost else 3.0, 0.035)
+	var sparks := _burst(fighter.global_position + fighter.attack_direction * (1.15 * reach) + Vector3.UP * 1.05, fighter.attack_direction + Vector3.UP * 0.25, 18 if ghost else 12, Color("ff3977") if ghost else Color("ffc55e"), 0.32, 3.8 if ghost else 3.0, 0.035)
 	var process := sparks.process_material as ParticleProcessMaterial
 	process.spread = 28.0
 	process.gravity = Vector3(0, -2.0, 0)
 	if finisher:
-		ground_ring(fighter.global_position + fighter.attack_direction * 1.2 + Vector3.UP * 0.07, Color("ac47e7") if ghost else Color("d99544"), 0.3, 3.4)
-
-func create_ghost_aura(fighter: DuelFighter) -> Node3D:
-	# The fighter owns this one native emitter. Death/reset/exit can free it at once.
-	var aura := Node3D.new()
-	aura.name = "GhostAura"
-	fighter.add_child(aura)
-	var motes := attach_trail(aura, Color("ed2463"), 24, 0.7)
-	motes.name = "GhostEmbers"
-	motes.position.y = 0.06
-	var process := motes.process_material as ParticleProcessMaterial
-	process.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_RING
-	process.emission_ring_axis = Vector3.UP
-	process.emission_ring_radius = 0.68
-	process.emission_ring_inner_radius = 0.36
-	process.emission_ring_height = 0.08
-	process.direction = Vector3.UP
-	process.spread = 10.0
-	process.initial_velocity_min = 0.8
-	process.initial_velocity_max = 1.3
-	process.gravity = Vector3(0, 0.35, 0)
-	process.tangential_accel_min = 0.7
-	process.tangential_accel_max = 1.6
-	process.particle_flag_align_y = true
-	var spark := motes.draw_pass_1 as SphereMesh
-	spark.radius = 0.017
-	spark.height = 0.17
-	var gradient := Gradient.new()
-	gradient.set_color(0, Color("f94d86"))
-	gradient.set_color(1, Color(0.19, 0.04, 0.32, 0.0))
-	gradient.add_point(0.38, Color("983bdd"))
-	(process.color_ramp as GradientTexture1D).gradient = gradient
-	var ring := MeshInstance3D.new()
-	var mesh := TorusMesh.new()
-	mesh.inner_radius = 0.6
-	mesh.outer_radius = 0.615
-	mesh.rings = 40
-	mesh.ring_segments = 4
-	ring.mesh = mesh
-	ring.position.y = 0.045
-	ring.scale.y = 0.18
-	ring.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	ring.material_override = _emissive(Color("782555"), 0.7)
-	aura.add_child(ring)
-	return aura
-
-func ghost_transition(fighter: DuelFighter, enabled: bool) -> void:
-	var pos := fighter.global_position + Vector3.UP * 0.075
-	sound("charge" if enabled else "cloth", pos, -12.0 if enabled else -17.0, 0.72 if enabled else 0.9)
-	ground_ring(pos, Color("c444bd") if enabled else Color("6b466b"), 0.4, 4.2 if enabled else 2.3)
-	if not enabled:
-		return
-	var embers := _burst(pos, Vector3.UP, 28, Color("f3417d"), 0.65, 2.5, 0.042)
-	var process := embers.process_material as ParticleProcessMaterial
-	process.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_RING
-	process.emission_ring_axis = Vector3.UP
-	process.emission_ring_radius = 0.72
-	process.emission_ring_inner_radius = 0.3
-	process.emission_ring_height = 0.1
-	process.spread = 12.0
-	process.gravity = Vector3(0, 1.0, 0)
-	_light_flash(pos + Vector3.UP * 1.2, Color("ab3b94"), 1.8, 3.0, 0.2)
-
-func skill_charge(fighter: DuelFighter) -> void:
-	sound("charge", fighter.global_position, -16.0, 1.5)
-	var pos := fighter.global_position
-	pos.y = 0.07
-	_energy_wave(pos, 4.8 * fighter.stats.range_multiplier, DuelFighter.SKILL_SWING, true)
-	var motes := _burst(pos + Vector3.UP * 0.65, Vector3.UP, 24, Color("70e8ff"), 0.34, 0.1, 0.045)
-	var process := motes.process_material as ParticleProcessMaterial
-	process.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_RING
-	process.emission_ring_axis = Vector3.UP
-	process.emission_ring_radius = 2.1
-	process.emission_ring_inner_radius = 1.8
-	process.emission_ring_height = 0.6
-	process.gravity = Vector3.ZERO
-	process.radial_accel_min = -48.0
-	process.radial_accel_max = -40.0
-
-func skill_spin(fighter: DuelFighter) -> void:
-	sound("spin", fighter.global_position, -3.0, 0.65)
-	var pivot := Node3D.new()
-	add_child(pivot)
-	pivot.global_position = fighter.global_position + Vector3.UP * 1.12
-	pivot.scale = Vector3.ONE * fighter.stats.range_multiplier * (1.3 if fighter.ghost_active else 1.0)
-	pivot.rotation.y = atan2(fighter.attack_direction.x, fighter.attack_direction.z) + 0.6
-	for i in 2:
-		var arc := MeshInstance3D.new()
-		var quad := QuadMesh.new()
-		quad.size = Vector2.ONE * (6.2 if i == 0 else 5.6)
-		arc.mesh = quad
-		arc.rotation = Vector3(-PI / 2.0, 0, i * PI)
-		arc.position.y = i * 0.16
-		arc.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-		var material := ShaderMaterial.new()
-		material.shader = preload("res://shaders/slash.gdshader")
-		material.set_shader_parameter("tint", Color("209dd8"))
-		material.set_shader_parameter("edge", Color("bafff6"))
-		material.set_shader_parameter("opacity", 0.95 if i == 0 else 0.45)
-		arc.material_override = material
-		pivot.add_child(arc)
-		var fade := create_tween()
-		fade.tween_method(func(value: float) -> void: material.set_shader_parameter("opacity", value), 0.95 if i == 0 else 0.45, 0.0, 0.36).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
-	var turn := create_tween()
-	turn.tween_property(pivot, "rotation:y", pivot.rotation.y - TAU * 1.08, 0.36).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
-	turn.tween_callback(pivot.queue_free)
-
-func skill_release(fighter: DuelFighter) -> void:
-	var pos := fighter.global_position
-	pos.y = 0.09
-	_energy_wave(pos, 7.2 * fighter.stats.range_multiplier * (1.3 if fighter.ghost_active else 1.0), 0.48)
-	var fragments := _burst(pos + Vector3.UP * 0.35, Vector3.UP, 42, Color("67d4ee"), 0.65, 2.0, 0.06)
-	var process := fragments.process_material as ParticleProcessMaterial
-	process.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_RING
-	process.emission_ring_axis = Vector3.UP
-	process.emission_ring_radius = 1.4
-	process.emission_ring_inner_radius = 0.8
-	process.emission_ring_height = 0.1
-	process.radial_accel_min = 14.0
-	process.radial_accel_max = 22.0
-	process.gravity = Vector3(0, -3, 0)
-	ground_ring(pos, Color("91f4ff"), 0.35)
+		ground_ring(fighter.global_position + fighter.attack_direction * (1.2 * reach) + Vector3.UP * 0.07, Color("ac47e7") if ghost else Color("d99544"), 0.3, 3.4 * reach)
 
 func storm_activate(pos: Vector3) -> void:
 	sound("charge", pos, -14.0, 1.15)

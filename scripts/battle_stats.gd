@@ -17,7 +17,6 @@ extends Resource
 @export var range_multiplier: float = 1.0
 @export var pickup_radius: float = 2.0
 @export_range(0.0, 1.0) var life_steal: float = 0.0
-@export_enum("无属性", "火", "冰", "光", "暗") var element: int = 0
-## Ordered fire, ice, light, dark. 0.1 means ten percentage points.
-@export var element_bonus: Array[float] = [0.0, 0.0, 0.0, 0.0]
+## Ordered fire, ice, light, dark. Attack elements belong to authored artifacts,
+## never to the character's stat upgrades or an inherited enchantment.
 @export var resistances: Array[float] = [0.0, 0.0, 0.0, 0.0]
