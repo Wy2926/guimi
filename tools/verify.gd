@@ -24,6 +24,11 @@ var sword_checks_completed := false
 var orb_checks_completed := false
 var aura_checks_completed := false
 var seal_checks_completed := false
+var ribbon_checks_completed := false
+var max_ribbon_particle_slots := 0
+var max_ribbon_spine_bones := 0
+var max_ribbon_history_points := 0
+var ribbon_skin_poses: Array[Dictionary] = []
 var performance: Dictionary = {"requested": false}
 
 func _ready() -> void:
@@ -54,6 +59,23 @@ func _process(delta: float) -> void:
 	max_active_swords = maxi(max_active_swords, scene.storm.active_swords)
 	max_active_meteors = maxi(max_active_meteors, scene.storm.meteors.size())
 	max_active_orbs = maxi(max_active_orbs, scene.orbs.orbs.size())
+	if not scene.storm.ribbon.is_empty():
+		max_ribbon_spine_bones = maxi(max_ribbon_spine_bones, scene.storm.ribbon.visual.spine_bones.size())
+		max_ribbon_history_points = maxi(max_ribbon_history_points, scene.storm.ribbon.visual.history.size())
+		if "--huntian-demo" in OS.get_cmdline_user_args() and scene.storm.ribbon_hits in [1, 3, 5] and ribbon_skin_poses.size() < (scene.storm.ribbon_hits+1)/2:
+			var visual: Node3D = scene.storm.ribbon.visual
+			var bones: Dictionary = {}
+			for bone in visual.spine_bones:
+				var pose: Transform3D = visual.skeleton.global_transform*visual.skeleton.get_bone_global_pose(bone)
+				bones[visual.skeleton.get_bone_name(bone)] = [pose.basis.x.x, pose.basis.y.x, pose.basis.z.x, pose.origin.x, pose.basis.x.y, pose.basis.y.y, pose.basis.z.y, pose.origin.y, pose.basis.x.z, pose.basis.y.z, pose.basis.z.z, pose.origin.z, 0, 0, 0, 1]
+			var targets: Array = []
+			for enemy: Node3D in scene.enemies.get_children():
+				targets.append([enemy.position.x, enemy.position.y, enemy.position.z])
+			ribbon_skin_poses.append({"hits": scene.storm.ribbon_hits, "bones": bones, "targets": targets})
+		var slots := 0
+		for emitter: GPUParticles3D in scene.storm.ribbon.path.find_children("*", "GPUParticles3D", true, false):
+			slots += emitter.amount
+		max_ribbon_particle_slots = maxi(max_ribbon_particle_slots, slots)
 
 func check(condition: bool, message: String) -> void:
 	(checks if condition else failures).append(message)
@@ -108,7 +130,7 @@ func prepare(automatic := false) -> void:
 
 func enemy_at(point: Vector3, health := 500.0, kind := "chaser", moving := false) -> ArenaEnemy:
 	var enemy := ENEMY_SCENE.instantiate() as ArenaEnemy
-	enemy.configure(kind, 0, 0)
+	enemy.configure(kind, 0, 0, false, kind == "boss")
 	enemy.target = scene.player
 	enemy.camera = scene.camera
 	enemy.arena_radius = scene.player.arena_radius
@@ -136,6 +158,15 @@ func run() -> void:
 		finish_report()
 		return
 	scene.set_frame_limit(requested_fps)
+	if "--huntian-demo" in OS.get_cmdline_user_args():
+		await huntian_demo()
+		return
+	if "--huntian-only" in OS.get_cmdline_user_args():
+		await check_huntian_body()
+		await check_huntian_ling()
+		check(ribbon_checks_completed, "Huntian Ling checks finish without a skipped runtime error")
+		finish_report()
+		return
 	check(scene.player.progression == scene.progression and scene.storm.player == scene.player and scene.storm.progression == scene.progression and scene.storm.feedback == scene.feedback, "Combat dependencies are explicitly supplied by the scene")
 	check(scene.orbs.player == scene.player and scene.orbs.progression == scene.progression and scene.orbs.feedback == scene.feedback and scene.orbs.camera == scene.camera, "Periodic orb dependencies are explicitly supplied by the scene")
 	check(scene.camera.projection == Camera3D.PROJECTION_ORTHOGONAL, "The game uses an orthographic 2.5D view")
@@ -165,12 +196,82 @@ func run() -> void:
 	check(orb_checks_completed, "The periodic-orb integration checks reach completion without a skipped runtime error")
 	await check_taiji_aura()
 	check(aura_checks_completed, "The Taiji aura checks reach completion without a skipped runtime error")
+	await check_huntian_body()
+	await check_huntian_ling()
+	check(ribbon_checks_completed, "Huntian Ling checks finish without a skipped runtime error")
 	await check_crowd_hits()
 	await check_restart()
 	await check_waves_and_endings()
 	if performance_enemies > 0:
 		await check_short_load()
 	finish_report()
+
+func huntian_demo() -> void:
+	# The normal arena, enemies, skill scheduler and hit animations, not a
+	# second visual-only implementation. Only deterministic fixture setup lives here.
+	await prepare(false)
+	scene.shake_enabled = false
+	scene.progression.skills.huntian_ling = 5
+	for point: Vector2 in [Vector2(-3,-1.6), Vector2(-4.6,-3.7), Vector2(-2.2,-5.2), Vector2(0.5,-4.6), Vector2(3.1,-5), Vector2(4.5,-2.6), Vector2(2.1,-1.4)]:
+		enemy_at(Vector3(point.x,0.04,point.y), 1000000.0)
+	scene.hud.notice = "混天绫演示 · 头部绕敌 / 绫身沿轨迹跟随 · Esc 暂停"
+	scene.hud.notice_left = 3600.0
+	if headless:
+		recording = true
+		check(await until(func() -> bool: return scene.storm.ribbon_hits == 7, 6.0), "The real arena demo chains seven separated targets")
+		scene.storm.ribbon_cooldown = 100.0
+		check(max_ribbon_spine_bones == 65 and max_ribbon_history_points > 80, "The demo bends one continuous 65-bone skin along the actual travelled multi-target route")
+		check(await until(func() -> bool: return scene.storm.ribbon.is_empty(), 2.0), "The demo chain cleans up completely after returning")
+		recording = false
+		finish_report()
+
+func check_huntian_body() -> void:
+	await prepare(false)
+	var visual := scene.storm.RIBBON_VISUAL.new() as Node3D
+	visual.feedback = scene.feedback
+	scene.storm.add_child(visual)
+	visual.set_physics_process(false)
+	visual.begin(Vector3(0, 1, 8))
+	for i in range(1, 121):
+		visual._append_point(Vector3(0, 1, 8-float(i)*0.1))
+	visual._pose_body()
+	var saved: Array[Transform3D] = []
+	for bone in visual.spine_bones:
+		saved.append(visual.skeleton.get_bone_global_pose(bone))
+	visual.rotation.y = PI/2.0
+	visual.position = Vector3(7, 2, -4)
+	visual._pose_body()
+	var isolated: bool = visual.model.global_transform.is_equal_approx(Transform3D.IDENTITY)
+	for i in visual.spine_bones.size():
+		isolated = isolated and saved[i].is_equal_approx(visual.skeleton.get_bone_global_pose(visual.spine_bones[i]))
+	check(isolated, "Moving or turning the head root does not rigidly rotate or translate the cloth skin")
+	for i in range(1, 31):
+		visual._append_point(Vector3(float(i)*0.1, 1, -4))
+	visual._pose_body()
+	var tail: Vector3 = visual.skeleton.get_bone_global_pose(visual.spine_bones[0]).origin
+	var middle: Vector3 = visual.skeleton.get_bone_global_pose(visual.spine_bones[32]).origin
+	var tip: Vector3 = visual.skeleton.get_bone_global_pose(visual.spine_bones[64]).origin
+	check(tail.distance_to(Vector3(0, 1, 5)) < 0.04 and middle.distance_to(Vector3(0, 1, -1)) < 0.04 and tip.distance_to(Vector3(3, 1, -4)) < 0.04, "After a right-angle head turn the tail and middle still follow their own positions on the old leg")
+	var retained: Array = visual.history.duplicate()
+	visual.age += 5.0
+	visual._pose_body()
+	check(visual.history == retained and visual.skeleton.get_bone_global_pose(visual.spine_bones[0]).origin.is_equal_approx(tail), "Five seconds without head travel cannot expire or straighten the tail")
+	for i in range(31, 151):
+		visual._append_point(Vector3(float(i)*0.1, 1, -4))
+	visual._pose_body()
+	tail = visual.skeleton.get_bone_global_pose(visual.spine_bones[0]).origin
+	check(tail.distance_to(Vector3(3, 1, -4)) < 0.04, "The tail takes the same corner only after one full cloth length of head travel")
+	var binding_ok: bool = visual.spine_bones.size() == 65 and visual.meshes.size() == 1 and visual.meshes[0].skin != null
+	for surface in visual.meshes[0].mesh.get_surface_count():
+		var arrays: Array = visual.meshes[0].mesh.surface_get_arrays(surface)
+		var weights: PackedFloat32Array = arrays[Mesh.ARRAY_WEIGHTS]
+		binding_ok = binding_ok and not weights.is_empty()
+		for i in range(0, weights.size(), 4):
+			binding_ok = binding_ok and absf(weights[i]+weights[i+1]+weights[i+2]+weights[i+3]-1.0) < 0.001
+	check(binding_ok, "Cloth, gold edges and cloud embroidery all have normalized native skin weights on the same mesh")
+	check(visual.history.size() <= 384 and visual.meshes[0].custom_aabb.has_point(tail), "History is bounded and the deformed tail stays inside the updated mesh culling bounds")
+	visual.queue_free()
+	await physics_wait(0.02)
 
 func check_damage_rules() -> void:
 	var attacker := BattleStats.new()
@@ -361,7 +462,7 @@ func check_skill_upgrade_ui() -> void:
 	scene.hud._choice_buttons[1].pressed.emit()
 	check(scene.state == "playing" and scene.progression.skill_level("thunder_orb") == 5, "Selecting the new skill card immediately upgrades its real run state and resumes play")
 	# HUD labels intentionally refresh every 80 ms; wait for that existing presentation tick.
-	var hud_updated := await until(func() -> bool: return scene.hud._skill_widgets.size() == 6 and scene.hud._skill_widgets.thunder_orb.title.text.contains("Lv.5"), 0.25)
+	var hud_updated := await until(func() -> bool: return scene.hud._skill_widgets.size() == 7 and scene.hud._skill_widgets.thunder_orb.title.text.contains("Lv.5"), 0.25)
 	check(hud_updated, "The fifth HUD slot reflects the selected skill rank on its normal presentation refresh")
 
 func check_active_skills() -> void:
@@ -803,6 +904,209 @@ func check_auxiliary_skills() -> void:
 	scene.feedback.child_entered_tree.disconnect(record_impact)
 	sword_checks_completed = true
 
+func check_huntian_ling() -> void:
+	await prepare(false)
+	var first := enemy_at(Vector3(0, 0.04, -3.0), 10000.0)
+	var second := enemy_at(Vector3(2.2, 0.04, -3.8), 10000.0)
+	var third := enemy_at(Vector3(-1.8, 0.04, -4.0), 10000.0)
+	var isolated := enemy_at(Vector3(5.8, 0.04, 2.0), 10000.0)
+	await physics_wait(0.15)
+	check(scene.storm.ribbon.is_empty() and scene.storm.ribbon_casts == 0, "Locked Huntian Ling neither creates a model nor consumes cooldown")
+	var definition: SkillDefinition = scene.progression.skill("huntian_ling")
+	var growth := definition.title == "哪吒·混天绫" and definition.kind == DamageRules.Kind.MAGICAL and definition.element == DamageRules.Element.NONE
+	for level in range(1, 6):
+		growth = growth and definition.count_at(level) == level + 2 and is_equal_approx(definition.coefficient_at(level), 0.88 * (1.0 + 0.2 * (level - 1)))
+	check(growth, "Five authored ranks grow one sash from three to seven distinct targets, with neutral magic damage")
+	var options: Array[Dictionary] = []
+	for option: Dictionary in scene.progression._available_choices():
+		if option.id == "skill_huntian_ling":
+			options.append(option)
+	check(options.size() == 1 and options[0].description.contains("连锁目标 3"), "The existing choice pool offers Huntian Ling with explicit chain count")
+	scene.progression.choices = options
+	scene.progression.pending_levels = 1
+	scene._on_choices(options)
+	scene.hud._choice_buttons[0].pressed.emit()
+	check(scene.progression.skill_level("huntian_ling") == 1 and scene.state == "playing", "The connected upgrade button unlocks Huntian Ling without another loadout system")
+	scene.player.stats.magic_attack = 100.0
+	scene.player.stats.element = DamageRules.Element.FIRE
+	scene.player.stats.element_bonus[0] = 0.8
+	scene.player.stats.life_steal = 0.1
+	scene.player.health = 40.0
+	for target in [first, second, third]:
+		target.stats.magic_defense = 25.0
+	scene.progression.skills.ghost = 1
+	scene.player.request_ghost()
+	scene.progression.skills.meteor = 1
+	scene.storm.meteor_chance = 1.0
+	var received: Array[Dictionary] = []
+	var record: Callable = func(target: Node3D, _point: Vector3, result: Dictionary, _heavy: bool, source: String) -> void:
+		if source == "混天绫":
+			received.append({"id": target.get_instance_id(), "damage": result.damage, "element": result.element})
+	scene.player.hit_confirmed.connect(record)
+	var launched := await until(func() -> bool: return not scene.storm.ribbon.is_empty(), 0.3)
+	check(launched and scene.storm.ribbon_casts == 1 and scene.player.attack_count == 0, "The sash autonomously launches once without a player swing")
+	if not launched:
+		scene.player.hit_confirmed.disconnect(record)
+		return
+	scene.storm.ribbon_cooldown = 100.0
+	var flight: Dictionary = scene.storm.ribbon
+	var visual: Node3D = flight.visual
+	var visual_id := visual.get_instance_id()
+	var path_id: int = flight.path.get_instance_id()
+	var mesh := visual.model.find_child("HuntianSilk", true, false) as MeshInstance3D
+	check(visual.model.scene_file_path.ends_with("huntian_ling.glb") and mesh != null and mesh.mesh.get_surface_count() == 3 and mesh.skin != null and mesh.mesh.get_blend_shape_count() == 0, "The runtime uses the continuous silk GLB with three skinned material surfaces, not whole-model morph swaps")
+	check(visual.spine_bones.size() == 65 and visual.skeleton.get_bone_count() == 66 and visual.BODY_LENGTH == 12.0, "A stationary root and 65 independent native spine bones carry the twelve-metre cloth")
+	var particle_ids: Array[int] = []
+	var slots := 0
+	for particles: GPUParticles3D in visual.emitters:
+		particle_ids.append(particles.get_instance_id())
+		slots += particles.amount
+	check(visual.emitters.size() == 4 and slots == 132, "Four stronger native trail layers use a fixed 132-slot budget")
+	await physics_wait(0.07)
+	var point: Vector3 = flight.follow.global_position
+	var age: float = visual.age
+	var cooldown: float = scene.storm.ribbon_cooldown
+	var bone_pose: Transform3D = visual.skeleton.get_bone_global_pose(visual.spine_bones[50])
+	var history_count: int = visual.history.size()
+	scene.toggle_pause()
+	await physics_wait(0.20)
+	check(flight.follow.global_position.is_equal_approx(point) and visual.age == age and visual.skeleton.get_bone_global_pose(visual.spine_bones[50]).is_equal_approx(bone_pose) and visual.history.size() == history_count and scene.storm.ribbon_cooldown == cooldown and received.is_empty(), "Pause freezes the head, actual skin pose, retained path, local shader clock and pending contact")
+	scene.toggle_pause()
+	scene.progression.skills.huntian_ling = 5
+	scene.player.stats.range_multiplier = 1.4
+	scene.storm.refresh_skills()
+	check(flight.visual.get_instance_id() == visual_id and flight.remaining == 2 and is_equal_approx(flight.coefficient, 0.88) and is_equal_approx(flight.jump_range, 4.6), "Mid-flight upgrades keep the same sash and the original three-target damage/range snapshot")
+	await until(func() -> bool: return scene.storm.ribbon.phase == "strike", 0.8)
+	var entry: Vector3 = flight.follow.global_position
+	await physics_wait(0.06)
+	check(visual.coiling and flight.follow.global_position.distance_to(entry) > 0.2 and received.is_empty(), "The real head keeps moving around its victim before the contact beat, instead of pausing for a whole-body morph")
+	check(await until(func() -> bool: return scene.storm.ribbon_hits == 3, 3.0), "A single physical sash completes three sequential real contacts")
+	var body_targets := 0
+	for target in [first, second, third]:
+		for bone in visual.spine_bones:
+			var position: Vector3 = visual.skeleton.get_bone_global_pose(bone).origin
+			if position.distance_to(target.global_position+Vector3.UP*0.95) < 0.9:
+				body_targets += 1
+				break
+	check(body_targets == 3 and visual.history.size() > 80 and visual.meshes.size() == 1, "The same physical cloth simultaneously spans all three victims without cloned coil meshes")
+	bone_pose = visual.skeleton.get_bone_global_pose(visual.spine_bones[20])
+	history_count = visual.history.size()
+	scene.toggle_pause()
+	await physics_wait(0.15)
+	check(visual.skeleton.get_bone_global_pose(visual.spine_bones[20]).is_equal_approx(bone_pose) and visual.history.size() == history_count and received.size() == 3, "Pause also freezes the real cloth spanning multiple victims without extra hits")
+	scene.toggle_pause()
+	var ids: Array[int] = []
+	var accurate := received.size() == 3
+	for result: Dictionary in received:
+		accurate = accurate and result.damage == 70 and result.element == DamageRules.Element.NONE and not ids.has(result.id)
+		ids.append(result.id)
+	check(accurate and first.health == 9930.0 and second.health == 9930.0 and third.health == 9930.0 and isolated.health == 10000.0, "Each chained victim loses 70 HP once through shared magic defense math; fire enchantment, ghost and the remote cluster add no phantom hits")
+	check(scene.player.health > 40.0 and scene.storm.meteor_rolls == 0 and scene.storm.sword_hits == 0, "Chain hits reuse life steal and never recursively roll swords or the guaranteed meteor")
+	check(is_instance_valid(visual) and visual.get_instance_id() == visual_id and first._stagger_left > 0.0, "The same deformed model attacks every target and reuses the enemy hit/stagger animation")
+	var same_emitters := true
+	for i in visual.emitters.size():
+		same_emitters = same_emitters and visual.emitters[i].get_instance_id() == particle_ids[i]
+	check(same_emitters, "Jumping preserves the primary model and all four trail emitters")
+	var live_contact_layers: int = flight.path.find_children("*", "GPUParticles3D", true, false).size()
+	check(live_contact_layers >= 7, "A confirmed hit adds gold sparks, red silk fragments and a sparse dust burst")
+	Input.action_press("move_right")
+	await physics_wait(0.32)
+	Input.action_release("move_right")
+	if not scene.storm.ribbon.is_empty() and scene.storm.ribbon.phase == "return":
+		check(scene.storm.ribbon.path.curve.get_point_position(1).distance_to(scene.player.global_position + Vector3.UP) < 0.10, "Return path tracks the moving player's current position")
+	check(await until(func() -> bool: return scene.storm.ribbon.is_empty(), 1.6), "The completed chain returns and cleanly dissolves without re-hitting its first enemy")
+	await physics_wait(0.04)
+	check(not is_instance_id_valid(visual_id) and not is_instance_id_valid(path_id), "All cloth, trail, burst and path nodes are released after the visual tail")
+	check(received.size() == 3, "The following body and retraction do not cause duplicate damage")
+	scene.player.hit_confirmed.disconnect(record)
+	await until(func() -> bool: return scene.hud._skill_widgets.huntian_ling.title.text.contains("Lv.5"), 0.2)
+	check(scene.hud._skill_widgets.huntian_ling.title.text.contains("混天绫") and scene.hud._skill_widgets.huntian_ling.binding.text.contains("哪吒"), "HUD names Nezha and the sash without forcing the full title into the compact slot")
+	var offers_maxed := false
+	for option: Dictionary in scene.progression._available_choices():
+		offers_maxed = offers_maxed or option.id == "skill_huntian_ling"
+	check(not offers_maxed, "A maximum-rank sash leaves the upgrade pool")
+
+	await prepare(false)
+	scene.progression.skills.huntian_ling = 5
+	await physics_wait(0.15)
+	check(scene.storm.ribbon_casts == 0 and scene.storm.ribbon_cooldown == 0.0, "No enemy means no empty cast or wasted sash cooldown")
+	first = enemy_at(Vector3(0, 0.04, -12.0), 10000.0)
+	await physics_wait(0.1)
+	check(scene.storm.ribbon_casts == 0, "Initial acquisition respects the configured 8.5-unit range")
+	first.position = Vector3(0, 0.04, -4.0)
+	first.hide()
+	await physics_wait(0.1)
+	check(scene.storm.ribbon_casts == 0, "Hidden enemies cannot start a chain")
+	first.show()
+	var camera_size: float = scene.camera.size
+	scene.camera.size = 2.0
+	await physics_wait(0.1)
+	check(scene.storm.ribbon_casts == 0, "Off-camera enemies inside range cannot start a chain")
+	scene.camera.size = camera_size
+	first.stats.dodge_chance = 1.0
+	await until(func() -> bool: return scene.storm.ribbon_casts == 1, 0.2)
+	scene.storm.ribbon_cooldown = 100.0
+	await until(func() -> bool: return not scene.storm.ribbon.is_empty() and scene.storm.ribbon.phase == "return", 1.5)
+	check(scene.storm.ribbon_hits == 0 and first.health == 10000.0 and scene.storm.ribbon.visited.size() == 1 and scene.storm.ribbon.path.find_children("*", "GPUParticles3D", true, false).size() == 4, "A dodged contact consumes its unique visit without false impact particles or repeated boss farming")
+	await until(func() -> bool: return scene.storm.ribbon.is_empty(), 1.3)
+	first.stats.dodge_chance = 0.0
+	scene.player.stats.cooldown_multiplier = 0.4
+	scene.storm.ribbon_cooldown = 0.0
+	await until(func() -> bool: return scene.storm.ribbon_casts == 2, 0.2)
+	check(absf(scene.storm.ribbon_cooldown - definition.cooldown * 0.4) < 0.03, "The existing cooldown multiplier shortens the next sash cycle")
+	first.queue_free()
+	scene.storm.ribbon_cooldown = 100.0
+	check(await until(func() -> bool: return scene.storm.ribbon.is_empty(), 1.4), "A freed in-flight target releases the native path safely")
+	check(scene.storm.ribbon_hits == 0, "Target loss cannot damage a stale instance")
+
+	await prepare(false)
+	first = enemy_at(Vector3(0, 0.04, -3.0), 10000.0)
+	second = enemy_at(Vector3(0, 0.04, -7.9), 10000.0)
+	scene.progression.skills.huntian_ling = 5
+	await until(func() -> bool: return scene.storm.ribbon_casts == 1, 0.2)
+	scene.storm.ribbon_cooldown = 100.0
+	await until(func() -> bool: return scene.storm.ribbon.is_empty(), 2.4)
+	check(scene.storm.ribbon_hits == 1 and second.health == 10000.0, "A next enemy 4.9 units away is not reached by a 4.6-unit chain jump")
+	scene.storm.ribbon_cooldown = 0.0
+	await until(func() -> bool: return scene.storm.ribbon_casts == 2, 0.2)
+	first.position = Vector3(12, 0.04, 0)
+	second.hide()
+	scene.storm.ribbon_cooldown = 100.0
+	await until(func() -> bool: return scene.storm.ribbon.is_empty(), 1.4)
+	check(scene.storm.ribbon_hits == 1, "A fleeing target outside range cancels its pending hit")
+
+	await prepare(false)
+	var rate := Engine.physics_ticks_per_second
+	Engine.physics_ticks_per_second = 30
+	for i in 7:
+		enemy_at(Vector3((i % 3 - 1) * 1.4, 0.04, -2.8 - floorf(float(i) / 3.0) * 1.4), 10000.0)
+	scene.progression.skills.huntian_ling = 5
+	await until(func() -> bool: return scene.storm.ribbon_casts == 1, 0.3)
+	scene.storm.ribbon_cooldown = 100.0
+	check(await until(func() -> bool: return scene.storm.ribbon_hits == 7, 6.0), "At 30 physics ticks, rank five still resolves exactly seven sequential native contacts")
+	Engine.physics_ticks_per_second = rate
+	var cancelled_id: int = scene.storm.ribbon.visual.get_instance_id()
+	scene.restart()
+	scene.director.enabled = false
+	scene.director._spawn_timer.stop()
+	await physics_wait(0.05)
+	check(not is_instance_id_valid(cancelled_id) and scene.storm.ribbon.is_empty() and scene.storm.ribbon_casts == 0 and scene.storm.ribbon_hits == 0 and scene.storm.ribbon_cooldown == 0.0 and scene.progression.skill_level("huntian_ling") == 0, "Restart clears all chain nodes, counters, cooldown and unlocked rank")
+	await prepare(false)
+	first = enemy_at(Vector3(0, 0.04, -4.0), 10000.0)
+	scene.progression.skills.huntian_ling = 1
+	await until(func() -> bool: return not scene.storm.ribbon.is_empty(), 0.2)
+	cancelled_id = scene.storm.ribbon.visual.get_instance_id()
+	scene.player.receive_damage({"damage": 10000.0, "critical": false, "dodged": false}, Vector3.ZERO)
+	await physics_wait(0.08)
+	check(scene.state == "lost" and scene.storm.ribbon.is_empty() and not is_instance_id_valid(cancelled_id) and first.health == 10000.0, "Player death cancels the travelling sash before a delayed hit can land")
+	await prepare(false)
+	first = enemy_at(Vector3(0, 0.04, -3.0), 1.0, "boss")
+	scene.progression.skills.huntian_ling = 1
+	check(await until(func() -> bool: return scene.state == "won", 1.5), "A real chain contact can defeat the boss through the existing victory signal")
+	await physics_wait(0.06)
+	check(scene.storm.ribbon.is_empty(), "Boss victory releases the lethal chain after the damage callback")
+	ribbon_checks_completed = true
+
 func check_thunder_orbs() -> void:
 	await prepare(false)
 	var target := enemy_at(Vector3(0, 0.04, -4.0), 10000.0)
@@ -968,7 +1272,7 @@ func check_taiji_aura() -> void:
 	for emitter: GPUParticles3D in aura._emitters:
 		particle_slots += emitter.amount
 	check(aura._emitters.size() == 4 and particle_slots == 160 and aura._pulse_particles.one_shot, "Four native particle layers share reusable emitters with a bounded 160-slot budget")
-	check(scene.hud._skill_widgets.size() == 6 and scene.hud._skill_widgets.taiji_aura.title.text.contains("太极图") and scene.hud._skill_widgets.taiji_aura.binding.text.contains("太上老君"), "The sixth HUD slot exposes the aura ability and its mythological owner without a new HUD system")
+	check(scene.hud._skill_widgets.size() == 7 and scene.hud._skill_widgets.taiji_aura.title.text.contains("太极图") and scene.hud._skill_widgets.taiji_aura.binding.text.contains("太上老君"), "The sixth HUD slot exposes the aura ability and its mythological owner without a new HUD system")
 	check(aura._boundary.material_override.shader.resource_path == "res://shaders/astral_ring.gdshader" and not aura._energy_meshes.is_empty() and aura._energy_meshes[0].get_surface_override_material(0).shader.resource_path == "res://assets/weapons/astral_edge/energy.gdshader", "Aura materials reuse the existing range and energy shaders")
 	var hits_before: int = aura.hit_count
 	await physics_wait(0.2)
@@ -1235,6 +1539,7 @@ func check_short_load() -> void:
 	scene.progression.skills.ghost = 1
 	scene.progression.skills.thunder_orb = 5
 	scene.progression.skills.taiji_aura = 5
+	scene.progression.skills.huntian_ling = 5
 	scene.player.stats.cooldown_multiplier = 0.4
 	scene.storm.refresh_skills()
 	scene.orbs.refresh_skills()
@@ -1261,7 +1566,7 @@ func check_short_load() -> void:
 	performance = {
 		"requested": true,
 		"scope": "headless_logic_load_only_not_rendered_fps" if headless else "rendered_short_fixture_not_target_hardware_guarantee",
-		"fixture": "Real AI enemies, six chained swords, rank-five dark gravity wells and light Taiji aura at minimum cooldown, meteor and ghost unlocked, movement and one forced active cast per 1.25 seconds; elevated health prevents upgrade/death pauses.",
+		"fixture": "Real AI enemies, six swords, rank-five dark wells, light Taiji aura and a seven-target Huntian sash at minimum cooldown, meteor and ghost unlocked; movement and forced actives; elevated health prevents pauses.",
 		"requested_enemies": performance_enemies,
 		"remaining_enemies": get_tree().get_nodes_in_group("enemies").size(),
 		"simulation_seconds": 5.0,
@@ -1276,10 +1581,16 @@ func check_short_load() -> void:
 		"aura_particle_emitters": scene.aura._emitters.size(),
 		"aura_pulses": scene.aura.pulse_count,
 		"aura_hits": scene.aura.hit_count,
+		"ribbon_casts": scene.storm.ribbon_casts,
+		"ribbon_hits": scene.storm.ribbon_hits,
+		"max_ribbon_particle_slots": max_ribbon_particle_slots,
+		"max_ribbon_spine_bones": max_ribbon_spine_bones,
+		"max_ribbon_history_points": max_ribbon_history_points,
 	}
 	check(scene.state == "playing" and not get_tree().paused, "The short crowd-load fixture completes without a state lock or unexpected upgrade pause")
 	check(max_active_swords <= 6 and max_active_meteors <= 2 and max_active_orbs <= 9, "Crowd-load auxiliary concurrency stays within its authored limits")
 	check(scene.aura._emitters.size() == 4 and scene.aura.pulse_count >= 8 and scene.aura.hit_count > 0, "The full-load formation keeps four emitters and continues real damage beside all existing skills")
+	check(scene.storm.ribbon_casts > 0 and scene.storm.ribbon_hits > 0 and max_ribbon_particle_slots <= 340 and max_ribbon_spine_bones == 65 and max_ribbon_history_points <= 384, "The full-load sash stays within 340 particle slots, one 65-bone skin and 384 history samples")
 	await capture("crowd-%d" % performance_enemies)
 
 func summarize(values: Array[float]) -> Dictionary:
@@ -1308,7 +1619,15 @@ func finish_report() -> void:
 		"limitations": "Headless runs verify logic, not rendered FPS. A short synthetic crowd fixture does not establish long-session stability, target-hardware performance, controller feel or visual approval.",
 	}
 	var mode := "headless" if headless else "rendered"
-	for path: String in ["res://artifacts/roguelite-verification.json", "res://artifacts/roguelite-verification-%dfps-%s.json" % [requested_fps, mode]]:
+	var paths: Array[String] = ["res://artifacts/roguelite-verification.json", "res://artifacts/roguelite-verification-%dfps-%s.json" % [requested_fps, mode]]
+	if "--huntian-demo" in OS.get_cmdline_user_args():
+		report["huntian_demo"] = {"spine_bones": max_ribbon_spine_bones, "history_points": max_ribbon_history_points, "max_particle_slots": max_ribbon_particle_slots}
+		var poses := FileAccess.open("res://artifacts/huntian-skin-poses.json", FileAccess.WRITE)
+		poses.store_string(JSON.stringify(ribbon_skin_poses))
+		paths = ["res://artifacts/huntian-demo-%s.json" % mode]
+	elif "--huntian-only" in OS.get_cmdline_user_args():
+		paths = ["res://artifacts/huntian-verification-%s.json" % mode]
+	for path: String in paths:
 		var output := FileAccess.open(path, FileAccess.WRITE)
 		if output != null:
 			output.store_string(JSON.stringify(report, "\t"))

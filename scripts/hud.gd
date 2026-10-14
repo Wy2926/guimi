@@ -144,6 +144,7 @@ func _refresh() -> void:
 	_update_skill("thunder_orb", orb_cooldown, false, 0.0)
 	var aura_cooldown: float = float(arena.aura.cooldown_left) if is_instance_valid(arena.aura) else 0.0
 	_update_skill("taiji_aura", aura_cooldown, false, 0.0)
+	_update_skill("huntian_ling", float(arena.storm.ribbon_cooldown), not arena.storm.ribbon.is_empty(), 0.0)
 	var boss = arena.boss
 	_boss_panel.visible = is_instance_valid(boss) and not boss.dead
 	if _boss_panel.visible:
@@ -164,7 +165,7 @@ func _update_skill(id: String, cooldown: float, active: bool, remaining: float) 
 	var title: Label = widgets.title
 	var status: Label = widgets.status
 	var bar: ProgressBar = widgets.bar
-	var title_text: String = definition.title.get_slice("·", 1) if id in ["taiji_aura", "meteor"] else definition.title
+	var title_text: String = definition.title.get_slice("·", 1) if id in ["taiji_aura", "meteor", "huntian_ling"] else definition.title
 	title.text = "%s  Lv.%d" % [title_text, level]
 	title.tooltip_text = definition.title + "\n" + definition.description
 	title.add_theme_color_override("font_color", INK if level > 0 else MUTED)
@@ -187,6 +188,10 @@ func _update_skill(id: String, cooldown: float, active: bool, remaining: float) 
 	elif id == "taiji_aura":
 		status.text = "半径 %.1f米 · %.1f秒" % [float(arena.aura.radius), cooldown]
 		status.add_theme_color_override("font_color", TEAL)
+		bar.value = clampf(1.0 - cooldown / maxf(0.1, float(definition.cooldown) * float(arena.player.stats.cooldown_multiplier)), 0.0, 1.0)
+	elif id == "huntian_ling":
+		status.text = "%d 连锁 · 穿梭中" % definition.count_at(level) if active else ("%d 连锁 · 就绪" % definition.count_at(level) if cooldown <= 0.0 else "连锁 · %.1f 秒" % cooldown)
+		status.add_theme_color_override("font_color", GOLD if active else TEAL)
 		bar.value = clampf(1.0 - cooldown / maxf(0.1, float(definition.cooldown) * float(arena.player.stats.cooldown_multiplier)), 0.0, 1.0)
 	elif active:
 		status.text = "解放中  %.1f 秒" % remaining
@@ -404,6 +409,7 @@ func _build_gameplay() -> void:
 	_make_skill("meteor", "照天印", "罗宣 · 被动火法")
 	_make_skill("thunder_orb", "雷缚珠", "被动 · 暗魔法")
 	_make_skill("taiji_aura", "太极图", "太上老君 · 被动阵法")
+	_make_skill("huntian_ling", "混天绫", "哪吒 · 被动连锁")
 	_hint = _label(column, "WASD / 左摇杆移动  ·  自动攻击  ·  击杀拾取经验，升级选择成长", 12, MUTED, HORIZONTAL_ALIGNMENT_CENTER)
 
 

@@ -375,6 +375,27 @@ func seal_impact(pos: Vector3, range_scale := 1.0, owner_node: Node3D = null) ->
 			effect.top_level = true
 			effect.global_transform = placement
 
+func ribbon_impact(pos: Vector3, direction: Vector3, owner_node: Node3D) -> void:
+	# Distinct, short contact layers composed from the same native burst/ring.
+	var sparks := _burst(pos, direction, 24, Color("ffd499"), 0.34, 5.6, 0.050)
+	var silk := _burst(pos, direction + Vector3.UP * 0.25, 20, Color("e64b57"), 0.65, 3.2, 0.075)
+	var dust := _burst(pos, Vector3.UP, 8, Color("c58f7b"), 0.50, 1.1, 0.09)
+	(dust.process_material as ParticleProcessMaterial).gravity = Vector3(0, 0.5, 0)
+	(dust.draw_pass_1.material as StandardMaterial3D).emission_enabled = false
+	var ring := ground_ring(pos, Color("efa664"), 0.32, 2.3)
+	ring.rotation = Vector3(0.45, atan2(direction.x, direction.z), 0.25)
+	var echo := ground_ring(pos + Vector3.UP*0.16, Color("d63b54"), 0.62, 2.65)
+	echo.rotation = Vector3(-0.32, ring.rotation.y, -0.3)
+	var light := _light_flash(pos, Color("ffc289"), 1.4, 2.4, 0.15)
+	for effect in [sparks, silk, dust, ring, echo, light]:
+		effect.reparent(owner_node)
+		var placement: Transform3D = effect.global_transform
+		effect.top_level = true
+		effect.global_transform = placement
+	sound("cloth", pos, -11.0, 1.45)
+	sound("swish", pos, -13.0, 1.25)
+	sound("impact", pos, -15.0, 1.2)
+
 func attach_trail(parent: Node3D, color: Color, amount: int = 18, lifetime: float = 0.26) -> GPUParticles3D:
 	# Native world-space particles leave a curved wake as their parent follows Curve3D.
 	# The projectile owns this emitter; freeing that node also frees its GPU resources.

@@ -1,0 +1,19 @@
+{
+  "mesh_instances": 1,
+  "material_surfaces": 3,
+  "vertices": 10900,
+  "triangles": 21516,
+  "materials_reused": [
+    "AE_Gold"
+  ],
+  "bones": 66,
+  "deforming_bones": 65,
+  "body_length": 12.0,
+  "skin_influences": 2,
+  "animations": {},
+  "morph_targets": [],
+  "flow": "independent native skin bones follow arc-length samples of the head history",
+  "texture": "512x512 packed silk weave",
+  "reference": "../concept/huntian-ling.png",
+  "preview": "Blender only, not runtime GPU particles"
+}

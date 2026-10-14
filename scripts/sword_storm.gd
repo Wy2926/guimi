@@ -18,6 +18,8 @@ const VOLLEY_INTERVAL := 0.24
 const METEOR_RADIUS := 3.2
 const METEOR_DELAY := 0.9
 const SEAL_VISUAL := preload("res://assets/effects/zhaotian_seal/zhaotian_seal.gd")
+const RIBBON_VISUAL := preload("res://assets/effects/huntian_ling/huntian_ling.gd")
+const RIBBON_JUMP_RANGE := 4.6
 
 enum FlightPhase { APPROACH, STRIKE, RETURN }
 
@@ -46,6 +48,10 @@ var target_cursor := 0
 var blade_cursor := 0
 var sword_query := PhysicsShapeQueryParameters3D.new()
 var meteor_query := PhysicsShapeQueryParameters3D.new()
+var ribbon: Dictionary = {}
+var ribbon_cooldown := 0.0
+var ribbon_casts := 0
+var ribbon_hits := 0
 
 func _ready() -> void:
 	# A native swept capsule covers the blade's contact point between physics ticks.
@@ -101,6 +107,12 @@ func _update_formation() -> void:
 
 func reset() -> void:
 	# Killing these bound tweens also cancels every pending impact on reset/toggle.
+	if not ribbon.is_empty() and ribbon.get("tween") != null:
+		ribbon.tween.kill()
+	ribbon.clear()
+	ribbon_cooldown = 0.0
+	ribbon_casts = 0
+	ribbon_hits = 0
 	for flight in flights:
 		flight.tween.kill()
 	for child in get_children():
@@ -134,10 +146,11 @@ func on_swing(_heavy: bool) -> void:
 	if rng.randf() < meteor_chance and meteors.size() < 2:
 		_call_meteor(targets[rng.randi_range(0, targets.size() - 1)])
 
-func _targets() -> Array[Node3D]:
+func _targets(target_range := -1.0) -> Array[Node3D]:
 	var targets: Array[Node3D] = []
+	var reach := target_range if target_range >= 0.0 else RANGE * player.stats.range_multiplier
 	for candidate in get_tree().get_nodes_in_group("enemies"):
-		if not candidate.dead and candidate.is_visible_in_tree() and candidate.global_position.distance_to(player.global_position) <= RANGE * player.stats.range_multiplier:
+		if not candidate.dead and candidate.is_visible_in_tree() and candidate.global_position.distance_to(player.global_position) <= reach:
 			targets.append(candidate)
 	return targets
 
@@ -163,6 +176,218 @@ func _physics_process(delta: float) -> void:
 		_fire_volley(_targets())
 	_advance_swords()
 	_advance_meteors(delta)
+	_advance_ribbon(delta)
+
+# Mixed with the existing native-path auxiliary scheduler deliberately: no
+# parallel damage engine, target registry, effect factory or chain framework.
+func _ribbon_target(origin: Vector3, distance: float, visited: Array) -> Node3D:
+	var nearest: Node3D
+	var best := distance * distance
+	var camera := get_viewport().get_camera_3d()
+	var reach: float = ribbon.get("range", progression.skill("huntian_ling").radius_at(progression.skill_level("huntian_ling")) * player.stats.range_multiplier)
+	for candidate in _targets(reach):
+		if candidate.get_instance_id() in visited or not _ribbon_visible(candidate, camera):
+			continue
+		var offset := candidate.global_position - origin
+		offset.y = 0.0
+		if offset.length_squared() <= best:
+			best = offset.length_squared()
+			nearest = candidate
+	return nearest
+
+func _ribbon_visible(target: Node3D, camera: Camera3D) -> bool:
+	return is_instance_valid(target) and not target.dead and target.is_visible_in_tree() and is_instance_valid(camera) and camera.is_position_in_frustum(target.global_position + Vector3.UP * 0.2) and camera.is_position_in_frustum(target.global_position + Vector3.UP)
+
+func _launch_ribbon(target: Node3D) -> void:
+	var definition := progression.skill("huntian_ling")
+	var level := progression.skill_level("huntian_ling")
+	var path := Path3D.new()
+	path.name = "HuntianChain"
+	add_child(path)
+	var follow := PathFollow3D.new()
+	follow.loop = false
+	follow.rotation_mode = PathFollow3D.ROTATION_XYZ
+	path.add_child(follow)
+	var visual := RIBBON_VISUAL.new()
+	visual.name = "HuntianLing"
+	visual.feedback = feedback
+	follow.add_child(visual)
+	var origin := player.global_position + Vector3.UP * 1.0
+	visual.begin(origin)
+	# Rank/range are cast snapshots, matching existing projectile semantics.
+	ribbon = {"path": path, "follow": follow, "visual": visual, "tween": null,
+		"visited": [], "remaining": definition.count_at(level), "coefficient": definition.coefficient_at(level),
+		"range": definition.radius_at(level) * player.stats.range_multiplier,
+		"jump_range": RIBBON_JUMP_RANGE * player.stats.range_multiplier,
+		"kind": definition.kind, "element": definition.element, "direction": player.facing,
+		"origin": origin, "leg_range": definition.radius_at(level) * player.stats.range_multiplier,
+		"phase": "flight", "left": 0.0, "contact": false}
+	ribbon_casts += 1
+	ribbon_cooldown = definition.cooldown * player.stats.cooldown_multiplier
+	_route_ribbon(target, origin)
+	feedback.sound("cloth", origin, -13.0, 1.18)
+
+func _route_ribbon(target: Node3D, start: Vector3) -> void:
+	if ribbon.tween != null:
+		ribbon.tween.kill()
+	ribbon.visual.trace_path()
+	var center := target.global_position + Vector3.UP * 0.95
+	var direction := center-start
+	direction.y = 0.0
+	direction = direction.normalized()
+	if direction.length_squared() < 0.001:
+		direction = player.facing
+	var departure: Vector3 = direction if ribbon.visited.is_empty() else -ribbon.follow.global_basis.z.normalized()
+	var side := direction.cross(Vector3.UP) * (-1.0 if ribbon.visited.size() % 2 == 0 else 1.0)
+	var destination := center-direction*RIBBON_VISUAL.COIL_RADIUS
+	var curve := Curve3D.new()
+	curve.bake_interval = 0.05
+	curve.add_point(start, Vector3.ZERO, departure * 0.85 + Vector3.UP * 0.12)
+	curve.add_point(start.lerp(destination, 0.55) + side * 0.70 + Vector3.UP * 0.38, -direction * 0.70, direction * 0.70)
+	# Enter tangentially into the real wrap, so the head does not stop or
+	# rotate the cloth as a rigid unit when it reaches a victim.
+	curve.add_point(destination, -side * 0.45, Vector3.ZERO)
+	ribbon.path.curve = curve
+	ribbon.follow.progress = 0.0
+	ribbon.entry_offset = -direction*RIBBON_VISUAL.COIL_RADIUS
+	ribbon.coil_side = side
+	ribbon.target = weakref(target)
+	ribbon.origin = start
+	ribbon.visited.append(target.get_instance_id())
+	ribbon.remaining -= 1
+	ribbon.phase = "flight"
+	ribbon.contact = false
+	ribbon.direction = direction
+	ribbon.visual.flow()
+	var duration := clampf(curve.get_baked_length() / 16.0, 0.16, 0.60)
+	ribbon.tween = ribbon.path.create_tween().set_process_mode(Tween.TWEEN_PROCESS_PHYSICS)
+	ribbon.tween.tween_property(ribbon.follow, "progress_ratio", 1.0, duration).set_trans(Tween.TRANS_LINEAR)
+
+func _strike_ribbon(target: Node3D) -> void:
+	ribbon.visual.trace_path()
+	var center := target.global_position+Vector3.UP*0.95
+	var curve := Curve3D.new()
+	curve.bake_interval = 0.035
+	var offsets: Array[Vector3] = []
+	var radial: Vector3 = ribbon.entry_offset
+	var side: Vector3 = ribbon.coil_side*RIBBON_VISUAL.COIL_RADIUS
+	# Four cubic 60-degree arcs: 240 degrees of genuine moving contact.
+	# The same skin then traverses this loop in head-to-tail order.
+	var handle := 4.0/3.0*tan(PI/12.0)
+	for i in 5:
+		var angle := float(i)*PI/3.0
+		var offset := radial*cos(angle)+side*sin(angle)+Vector3.UP*(0.08*sin(angle))
+		var tangent := -radial*sin(angle)+side*cos(angle)+Vector3.UP*(0.08*cos(angle))
+		offsets.append(offset)
+		curve.add_point(center+offset, -tangent*handle, tangent*handle)
+	ribbon.path.curve = curve
+	ribbon.follow.progress = 0.0
+	ribbon.coil_offsets = offsets
+	ribbon.phase = "strike"
+	ribbon.left = RIBBON_VISUAL.STRIKE_TIME
+	ribbon.visual.strike()
+	ribbon.tween = ribbon.path.create_tween().set_process_mode(Tween.TWEEN_PROCESS_PHYSICS)
+	ribbon.tween.tween_property(ribbon.follow, "progress_ratio", 1.0, RIBBON_VISUAL.STRIKE_TIME)
+
+func _return_ribbon() -> void:
+	if ribbon.tween != null:
+		ribbon.tween.kill()
+	ribbon.visual.trace_path()
+	var start: Vector3 = ribbon.follow.global_position
+	var destination := player.global_position + Vector3.UP
+	var curve := Curve3D.new()
+	curve.add_point(start, Vector3.ZERO, -ribbon.follow.global_basis.z.normalized() * 0.85 + Vector3.UP * 0.5)
+	curve.add_point(destination, (start - destination).normalized() * 0.8 + Vector3.UP * 0.4, Vector3.ZERO)
+	ribbon.path.curve = curve
+	ribbon.follow.progress = 0.0
+	ribbon.phase = "return"
+	ribbon.visual.flow()
+	ribbon.tween = ribbon.path.create_tween().set_process_mode(Tween.TWEEN_PROCESS_PHYSICS)
+	ribbon.tween.tween_property(ribbon.follow, "progress_ratio", 1.0, 0.48).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+
+func _advance_ribbon(delta: float) -> void:
+	if player.dead or not player.enabled:
+		return
+	ribbon_cooldown = maxf(0.0, ribbon_cooldown - delta)
+	if progression.skill_level("huntian_ling") <= 0:
+		if not ribbon.is_empty():
+			ribbon.tween.kill()
+			ribbon.path.queue_free()
+			ribbon.clear()
+		return
+	if ribbon.is_empty():
+		if ribbon_cooldown <= 0.0:
+			var target := _ribbon_target(player.global_position, progression.skill("huntian_ling").radius_at(progression.skill_level("huntian_ling")) * player.stats.range_multiplier, [])
+			if target != null:
+				_launch_ribbon(target)
+		return
+	if ribbon.phase == "fade":
+		ribbon.left -= delta
+		if ribbon.left <= 0.0:
+			ribbon.path.queue_free()
+			ribbon.clear()
+		return
+	if ribbon.phase == "return":
+		ribbon.path.curve.set_point_position(1, player.global_position + Vector3.UP)
+		if not ribbon.tween.is_running():
+			ribbon.visual.dissolve()
+			ribbon.phase = "fade"
+			ribbon.left = 0.65
+		return
+	var target := (ribbon.target as WeakRef).get_ref() as Node3D
+	var valid := _ribbon_visible(target, get_viewport().get_camera_3d())
+	if valid:
+		var from_player := target.global_position - player.global_position
+		var from_origin: Vector3 = target.global_position - ribbon.origin
+		from_player.y = 0.0
+		from_origin.y = 0.0
+		valid = from_player.length_squared() <= float(ribbon.range) ** 2 and from_origin.length_squared() <= float(ribbon.leg_range) ** 2
+	if ribbon.phase == "flight" and valid:
+		ribbon.path.curve.set_point_position(2, target.global_position + Vector3.UP * 0.95 + ribbon.entry_offset)
+		if ribbon.tween.is_running():
+			return
+		ribbon.follow.progress_ratio = 1.0
+		_strike_ribbon(target)
+		return
+	if ribbon.phase == "strike":
+		ribbon.left -= delta
+		if valid:
+			for i in ribbon.coil_offsets.size():
+				ribbon.path.curve.set_point_position(i, target.global_position + Vector3.UP * 0.95 + ribbon.coil_offsets[i])
+			if not ribbon.contact and RIBBON_VISUAL.STRIKE_TIME - float(ribbon.left) >= RIBBON_VISUAL.CONTACT_TIME:
+				ribbon.contact = true
+				_ribbon_contact(target)
+		# The head keeps moving through the wrap even after its contact beat.
+		if ribbon.tween.is_running() and (valid or ribbon.contact):
+			return
+	var origin: Vector3 = ribbon.follow.global_position
+	# Preserve the authored enemy-to-enemy jump distance; the decorative
+	# half-metre wrap must not silently extend acquisition range.
+	var jump_origin: Vector3 = target.global_position if is_instance_valid(target) else origin
+	var next := _ribbon_target(jump_origin, ribbon.jump_range, ribbon.visited) if ribbon.remaining > 0 else null
+	if next != null:
+		ribbon.leg_range = ribbon.jump_range
+		_route_ribbon(next, origin)
+		ribbon.origin = jump_origin
+	else:
+		_return_ribbon()
+
+func _ribbon_contact(target: Node3D) -> void:
+	# Reuse the scheduler's native contact query. This tight coil only hits its
+	# selected victim, never everyone near the decorative sweep or trail.
+	var point: Vector3 = ribbon.follow.global_position
+	var shape := sword_query.shape as CapsuleShape3D
+	shape.height = shape.radius * 2.0
+	sword_query.transform = Transform3D(Basis.IDENTITY, point)
+	for contact in get_world_3d().direct_space_state.intersect_shape(sword_query, 128):
+		if contact.collider != target:
+			continue
+		var hit := player.deal_damage(target, ribbon.kind, ribbon.coefficient, ribbon.element, false, false, "混天绫", ribbon.direction)
+		if float(hit.get("actual", 0.0)) > 0.0:
+			ribbon_hits += 1
+			ribbon.visual.hit()
+			feedback.ribbon_impact(point, ribbon.direction, ribbon.path)
+		break
 
 func _fire_volley(targets: Array[Node3D]) -> void:
 	if targets.is_empty() or blades.is_empty():

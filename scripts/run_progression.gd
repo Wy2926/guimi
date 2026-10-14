@@ -15,6 +15,7 @@ signal choice_requested(options: Array[Dictionary])
 	preload("res://data/skills/zhaotian_seal.tres"),
 	preload("res://data/skills/thunder_orb.tres"),
 	preload("res://data/skills/taiji_aura.tres"),
+	preload("res://data/skills/huntian_ling.tres"),
 ]
 
 const ELEMENT_NAMES: Array[String] = ["无属性", "火", "冰", "光", "暗"]
@@ -144,7 +145,8 @@ func _available_choices() -> Array[Dictionary]:
 		else:
 			card_description = "%s伤害基础倍率 %.0f%% → %.0f%%。" % [DAMAGE_NAMES[definition.kind], definition.coefficient_at(rank) * 100.0, definition.coefficient_at(rank + 1) * 100.0]
 		if not definition.counts.is_empty():
-			card_description += "\n数量 %d" % definition.count_at(1) if rank == 0 else "\n数量 %d → %d" % [definition.count_at(rank), definition.count_at(rank + 1)]
+			var count_label := "连锁目标" if definition.id == "huntian_ling" else "数量"
+			card_description += "\n%s %d" % [count_label, definition.count_at(1)] if rank == 0 else "\n%s %d → %d" % [count_label, definition.count_at(rank), definition.count_at(rank + 1)]
 		if definition.radius > 0.0:
 			card_description += " · 范围半径 %.2f" % definition.radius_at(1) if rank == 0 else " · 范围半径 %.2f → %.2f" % [definition.radius_at(rank), definition.radius_at(rank + 1)]
 		if not is_zero_approx(definition.visual_scale_growth):
