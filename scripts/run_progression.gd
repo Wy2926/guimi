@@ -14,6 +14,7 @@ signal choice_requested(options: Array[Dictionary])
 	preload("res://data/skills/swords.tres"),
 	preload("res://data/skills/meteor.tres"),
 	preload("res://data/skills/thunder_orb.tres"),
+	preload("res://data/skills/taiji_aura.tres"),
 ]
 
 const ELEMENT_NAMES: Array[String] = ["无属性", "火", "冰", "光", "暗"]

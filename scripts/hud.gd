@@ -142,6 +142,8 @@ func _refresh() -> void:
 	_update_skill("meteor", 0.0, false, 0.0)
 	var orb_cooldown: float = float(arena.orbs.cooldown_left) if is_instance_valid(arena.orbs) else 0.0
 	_update_skill("thunder_orb", orb_cooldown, false, 0.0)
+	var aura_cooldown: float = float(arena.aura.cooldown_left) if is_instance_valid(arena.aura) else 0.0
+	_update_skill("taiji_aura", aura_cooldown, false, 0.0)
 	var boss = arena.boss
 	_boss_panel.visible = is_instance_valid(boss) and not boss.dead
 	if _boss_panel.visible:
@@ -162,7 +164,9 @@ func _update_skill(id: String, cooldown: float, active: bool, remaining: float) 
 	var title: Label = widgets.title
 	var status: Label = widgets.status
 	var bar: ProgressBar = widgets.bar
-	title.text = "%s  Lv.%d" % [definition.title, level]
+	var title_text: String = definition.title.get_slice("·", 1) if id == "taiji_aura" else definition.title
+	title.text = "%s  Lv.%d" % [title_text, level]
+	title.tooltip_text = definition.title + "\n" + definition.description
 	title.add_theme_color_override("font_color", INK if level > 0 else MUTED)
 	if level <= 0:
 		status.text = "升级时可领悟"
@@ -179,6 +183,10 @@ func _update_skill(id: String, cooldown: float, active: bool, remaining: float) 
 	elif id == "thunder_orb":
 		status.text = "%d 颗 · 自动索敌" % definition.count_at(level) if cooldown <= 0.0 else "%d 颗 · %.1f 秒后投射" % [definition.count_at(level), cooldown]
 		status.add_theme_color_override("font_color", TEAL if cooldown <= 0.0 else MUTED)
+		bar.value = clampf(1.0 - cooldown / maxf(0.1, float(definition.cooldown) * float(arena.player.stats.cooldown_multiplier)), 0.0, 1.0)
+	elif id == "taiji_aura":
+		status.text = "半径 %.1f米 · %.1f秒" % [float(arena.aura.radius), cooldown]
+		status.add_theme_color_override("font_color", TEAL)
 		bar.value = clampf(1.0 - cooldown / maxf(0.1, float(definition.cooldown) * float(arena.player.stats.cooldown_multiplier)), 0.0, 1.0)
 	elif active:
 		status.text = "解放中  %.1f 秒" % remaining
@@ -395,6 +403,7 @@ func _build_gameplay() -> void:
 	_make_skill("swords", "万剑归宗", "被动")
 	_make_skill("meteor", "流星", "被动")
 	_make_skill("thunder_orb", "雷缚珠", "被动 · 暗魔法")
+	_make_skill("taiji_aura", "太极图", "太上老君 · 被动阵法")
 	_hint = _label(column, "WASD / 左摇杆移动  ·  自动攻击  ·  击杀拾取经验，升级选择成长", 12, MUTED, HORIZONTAL_ALIGNMENT_CENTER)
 
 
@@ -405,6 +414,7 @@ func _make_skill(id: String, title: String, key: String) -> void:
 	var key_label := _label(column, key, 11, MUTED)
 	key_label.name = "Binding"
 	var title_label := _label(column, title, 16, INK)
+	title_label.mouse_filter = Control.MOUSE_FILTER_PASS
 	var status := _label(column, "升级时可领悟", 12, MUTED)
 	for label in [key_label, title_label, status]:
 		label.clip_text = true

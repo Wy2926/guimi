@@ -1,0 +1,52 @@
+{
+  "mesh_batches": 12,
+  "triangles": 69160,
+  "trigrams_bottom_to_top": {
+    "Qian": [
+      1,
+      1,
+      1
+    ],
+    "Dui": [
+      1,
+      1,
+      0
+    ],
+    "Li": [
+      1,
+      0,
+      1
+    ],
+    "Zhen": [
+      1,
+      0,
+      0
+    ],
+    "Kun": [
+      0,
+      0,
+      0
+    ],
+    "Gen": [
+      0,
+      0,
+      1
+    ],
+    "Kan": [
+      0,
+      1,
+      0
+    ],
+    "Xun": [
+      0,
+      1,
+      1
+    ]
+  },
+  "materials_reused": [
+    "AE_Gold"
+  ],
+  "animation": "TaijiOrbit",
+  "duration_seconds": 24,
+  "preview": "Blender model only, not runtime GPU particles"
+}

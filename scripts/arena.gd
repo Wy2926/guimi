@@ -4,6 +4,7 @@ extends Node3D
 const PLAYER_SCENE = preload("res://scenes/player.tscn")
 const STORM_SCRIPT = preload("res://scripts/sword_storm.gd")
 const ORBS_SCRIPT = preload("res://scripts/thunder_orbs.gd")
+const AURA_SCRIPT = preload("res://scripts/taiji_aura.gd")
 const FEEDBACK_SCRIPT = preload("res://scripts/feedback.gd")
 const ARENA_RADIUS := 15.8
 const CAMERA_OFFSET := Vector3(10, 24, 10)
@@ -19,6 +20,7 @@ var progression: RunProgression
 var director: WaveDirector
 var storm: Node3D
 var orbs: Node3D
+var aura: Area3D
 var boss: Node3D
 var state := "loading"
 var ready_to_play := false
@@ -55,6 +57,12 @@ func _ready() -> void:
 	orbs.feedback = feedback
 	orbs.camera = camera
 	add_child(orbs)
+	aura = AURA_SCRIPT.new()
+	aura.name = "TaijiAura"
+	aura.player = player
+	aura.progression = progression
+	aura.feedback = feedback
+	add_child(aura)
 	director = WaveDirector.new()
 	director.name = "Waves"
 	director.player = player
@@ -153,6 +161,7 @@ func choose_upgrade(index: int) -> void:
 	player._refresh_range()
 	storm.refresh_skills()
 	orbs.refresh_skills()
+	aura.refresh_skills()
 	if progression.pending_levels == 0:
 		hud.choice_panel.hide()
 		state = "playing"
@@ -210,7 +219,7 @@ func _on_hit(target: Node3D, point: Vector3, result: Dictionary, heavy: bool, so
 	_impact_left = 0.07
 	var direction := (target.global_position - player.global_position).normalized()
 	# Sword contact owns its directional flash; only camera/haptics share this budget.
-	if source not in ["飞剑", "流星", "雷缚珠"]:
+	if source not in ["飞剑", "流星", "雷缚珠", "太极图"]:
 		feedback.impact(point, direction, lethal, heavy, player.ghost_active, player.combo_finisher)
 	shake_time = 0.16
 	shake_power = 0.055 if heavy else 0.025
@@ -235,9 +244,11 @@ func _finish(won: bool) -> void:
 	director.enabled = false
 	storm.set_physics_process(false)
 	orbs.set_physics_process(false)
+	aura.set_physics_process(false)
 	# A lethal meteor can be inside its own iteration; release attacks afterwards.
 	storm.reset.call_deferred()
 	orbs.reset.call_deferred()
+	aura.reset.call_deferred()
 	get_tree().paused = true
 	hud.show_result(won)
 
@@ -251,6 +262,7 @@ func restart() -> void:
 	player.reset_fighter()
 	storm.reset()
 	orbs.reset()
+	aura.reset()
 	director.reset()
 	for container in [enemies, drops]:
 		for child in container.get_children():
@@ -265,6 +277,7 @@ func restart() -> void:
 	player.feedback = feedback
 	storm.feedback = feedback
 	orbs.feedback = feedback
+	aura.feedback = feedback
 	boss = null
 	hit_count = 0
 	defeat_count = 0
@@ -276,6 +289,7 @@ func restart() -> void:
 	hud.reset_hud()
 	storm.set_physics_process(true)
 	orbs.set_physics_process(true)
+	aura.set_physics_process(true)
 	player.enabled = true
 	ready_to_play = true
 	state = "playing"

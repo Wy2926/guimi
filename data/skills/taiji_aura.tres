@@ -1,0 +1,18 @@
+[gd_resource type="Resource" script_class="SkillDefinition" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/skill_definition.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = "taiji_aura"
+title = "太上老君·太极图"
+description = "领悟随身两仪八卦阵，每1.2秒以清气荡涤阵内敌人，造成光属性魔法伤害。升级提高伤害与半径；范围、冷却属性生效，不击退，不触发辅助技能。"
+category = "passive"
+kind = 1
+coefficient = 0.55
+coefficient_growth = 0.2
+element = 3
+cooldown = 1.2
+max_level = 5
+radius = 2.6
+radius_growth = 0.25

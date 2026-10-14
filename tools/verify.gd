@@ -22,6 +22,7 @@ var max_active_meteors := 0
 var max_active_orbs := 0
 var sword_checks_completed := false
 var orb_checks_completed := false
+var aura_checks_completed := false
 var performance: Dictionary = {"requested": false}
 
 func _ready() -> void:
@@ -159,6 +160,8 @@ func run() -> void:
 	check(sword_checks_completed, "The automatic sword integration checks reach completion without a skipped runtime error")
 	await check_thunder_orbs()
 	check(orb_checks_completed, "The periodic-orb integration checks reach completion without a skipped runtime error")
+	await check_taiji_aura()
+	check(aura_checks_completed, "The Taiji aura checks reach completion without a skipped runtime error")
 	await check_crowd_hits()
 	await check_restart()
 	await check_waves_and_endings()
@@ -355,7 +358,7 @@ func check_skill_upgrade_ui() -> void:
 	scene.hud._choice_buttons[1].pressed.emit()
 	check(scene.state == "playing" and scene.progression.skill_level("thunder_orb") == 5, "Selecting the new skill card immediately upgrades its real run state and resumes play")
 	# HUD labels intentionally refresh every 80 ms; wait for that existing presentation tick.
-	var hud_updated := await until(func() -> bool: return scene.hud._skill_widgets.size() == 5 and scene.hud._skill_widgets.thunder_orb.title.text.contains("Lv.5"), 0.25)
+	var hud_updated := await until(func() -> bool: return scene.hud._skill_widgets.size() == 6 and scene.hud._skill_widgets.thunder_orb.title.text.contains("Lv.5"), 0.25)
 	check(hud_updated, "The fifth HUD slot reflects the selected skill rank on its normal presentation refresh")
 
 func check_active_skills() -> void:
@@ -843,6 +846,136 @@ func check_thunder_orbs() -> void:
 	check(not death_orbs.is_empty() and scene.state == "lost" and expired_on_death and target._gravity_wells.is_empty(), "Player death frees fields and particles and releases control even while the result pauses the tree")
 	orb_checks_completed = true
 
+func check_taiji_aura() -> void:
+	await prepare(false)
+	var aura: Area3D = scene.aura
+	check(aura.player == scene.player and aura.feedback == scene.feedback and aura.progression == scene.progression, "The Taiji aura uses the existing explicitly supplied combat dependencies")
+	check(not is_instance_valid(aura._visual) and not aura.monitoring and scene.progression.skill_level("taiji_aura") == 0, "A locked aura has no visuals, emitters or active collision")
+	var definition: SkillDefinition = scene.progression.skill("taiji_aura")
+	var growth_ok := true
+	for rank in range(1, 6):
+		growth_ok = growth_ok and is_equal_approx(definition.coefficient_at(rank), [0.55, 0.66, 0.77, 0.88, 0.99][rank - 1]) and is_equal_approx(definition.radius_at(rank), [2.6, 2.85, 3.1, 3.35, 3.6][rank - 1])
+	check(growth_ok and definition.kind == DamageRules.Kind.MAGICAL and definition.element == DamageRules.Element.LIGHT, "Five authored ranks grow the fixed-light magical aura without changing shared Resource data")
+	var target := enemy_at(Vector3(0, 0.04, -1.8), 10000.0)
+	var outside := enemy_at(Vector3(2.72, 0.04, 0), 10000.0)
+	scene.player.stats.magic_attack = 80.0
+	scene.player.stats.element = DamageRules.Element.DARK
+	scene.player.stats.element_bonus[2] = 0.2
+	scene.player.stats.element_bonus[3] = 0.8
+	scene.player.stats.life_steal = 0.1
+	scene.player.health = 50.0
+	target.stats.resistances = [0.0, 0.0, 0.3, -0.5]
+	var options: Array[Dictionary] = []
+	for option: Dictionary in scene.progression._available_choices():
+		if option.id == "skill_taiji_aura":
+			options.append(option)
+	check(options.size() == 1 and options[0].title.contains("太上老君") and options[0].description.contains("光"), "The existing choice pool offers the mythology-named aura with its protected light element")
+	scene.progression.choices = options
+	scene.progression.pending_levels = 1
+	scene._on_choices(options)
+	scene.hud._choice_buttons[0].pressed.emit()
+	check(scene.state == "playing" and scene.progression.skill_level("taiji_aura") == 1 and is_instance_valid(aura._visual), "Choosing the real upgrade button unlocks the formation and resumes play")
+	if not is_instance_valid(aura._visual):
+		return
+	var visual_id: int = aura._visual.get_instance_id()
+	var glyphs := aura._model.find_child("Bagua", true, false) as Node3D
+	var initial_basis := glyphs.basis
+	var received: Array[Dictionary] = []
+	var record_hit: Callable = func(_target: Node3D, _point: Vector3, result: Dictionary, _heavy: bool, source: String) -> void:
+		if source == "太极图":
+			received.append(result.duplicate())
+	scene.player.hit_confirmed.connect(record_hit)
+	var landed := await until(func() -> bool: return not received.is_empty(), 1.6)
+	check(landed and received[0].element == DamageRules.Element.LIGHT and received[0].damage == 40, "Aura pulses use magic attack and light resistance through DamageRules, ignoring dark enchantment")
+	check(scene.player.attack_count == 0 and scene.storm.meteor_rolls == 0 and scene.storm.volley_count == 0 and scene.orbs.cast_count == 0, "The aura works without attacks and cannot recursively trigger other passives")
+	check(scene.player.health > 50.0 and target._stagger_left == 0.0 and target._push == Vector3.ZERO, "Aura hits retain shared life steal without knockback or hard stagger")
+	check(outside.health == 10000.0 and aura.hit_count == 1, "Touching the native cylinder outside the visible 2.6m boundary does not deal damage")
+	check(aura._model.scene_file_path.ends_with("taiji_aura.glb") and aura._model.find_children("*", "MeshInstance3D", true, false).size() == 12 and aura._animation.is_playing() and not glyphs.basis.is_equal_approx(initial_basis), "The real formation loads the Blender GLB, 12 material batches and native counter-rotation")
+	var particle_slots := 0
+	for emitter: GPUParticles3D in aura._emitters:
+		particle_slots += emitter.amount
+	check(aura._emitters.size() == 4 and particle_slots == 160 and aura._pulse_particles.one_shot, "Four native particle layers share reusable emitters with a bounded 160-slot budget")
+	check(scene.hud._skill_widgets.size() == 6 and scene.hud._skill_widgets.taiji_aura.title.text.contains("太极图") and scene.hud._skill_widgets.taiji_aura.binding.text.contains("太上老君"), "The sixth HUD slot exposes the aura ability and its mythological owner without a new HUD system")
+	check(aura._boundary.material_override.shader.resource_path == "res://shaders/astral_ring.gdshader" and not aura._energy_meshes.is_empty() and aura._energy_meshes[0].get_surface_override_material(0).shader.resource_path == "res://assets/weapons/astral_edge/energy.gdshader", "Aura materials reuse the existing range and energy shaders")
+	var hits_before: int = aura.hit_count
+	await physics_wait(0.2)
+	check(aura.hit_count == hits_before, "Continuous overlap does not damage on every physics frame")
+	scene.toggle_pause()
+	var frozen_age: float = aura.age
+	var frozen_cd: float = aura.cooldown_left
+	var frozen_anim: float = aura._animation.current_animation_position
+	await physics_wait(0.25)
+	check(aura.age == frozen_age and aura.cooldown_left == frozen_cd and aura._animation.current_animation_position == frozen_anim and aura.hit_count == hits_before, "Pause freezes aura damage, cooldown, shader clock and native model animation")
+	scene.toggle_pause()
+	scene.progression.skills.taiji_aura = 5
+	scene.player.stats.range_multiplier = 1.5
+	aura.refresh_skills()
+	check(aura._visual.get_instance_id() == visual_id and aura.cooldown_left == frozen_cd and is_equal_approx(aura.radius, 5.4), "Rank/range upgrades resize the same instance without an extra free pulse")
+	await physics_wait(0.04)
+	check(is_equal_approx(aura._shape.radius, 5.4) and aura._visual.scale == Vector3(5.4, 1.0, 5.4), "Native collision and displayed boundary receive the same upgraded radius")
+	aura.cooldown_left = 100.0
+	scene.player.position = Vector3(8, 0.04, 0)
+	scene.player.facing = Vector3.RIGHT
+	await physics_wait(0.06)
+	check(is_equal_approx(aura.global_position.x, scene.player.global_position.x) and is_equal_approx(aura.global_position.z, scene.player.global_position.z) and aura.basis.is_equal_approx(Basis.IDENTITY), "The formation follows translation without inheriting facing rotation")
+	var health_before: float = target.health
+	aura.cooldown_left = 0.0
+	await physics_wait(0.04)
+	check(target.health == health_before, "Moving the field away cannot leave stale damage at the old center")
+	scene.player.hit_confirmed.disconnect(record_hit)
+	scene.restart()
+	scene.director.enabled = false
+	scene.director._spawn_timer.stop()
+	await physics_wait(0.05)
+	check(not is_instance_id_valid(visual_id) and not is_instance_valid(aura._visual) and aura.pulse_count == 0 and aura.hit_count == 0 and scene.progression.skill_level("taiji_aura") == 0, "Restart releases the model, particle children and all aura run state")
+
+	await prepare(false)
+	scene.progression.skills.taiji_aura = 5
+	scene.player.stats.cooldown_multiplier = 0.4
+	aura.refresh_skills()
+	var crowd: Array[ArenaEnemy] = []
+	for i in 32:
+		var angle := float(i) * TAU / 32.0
+		crowd.append(enemy_at(Vector3(cos(angle) * 1.6, 0.04, sin(angle) * 1.6), 10000.0))
+	var crowd_hit := await until(func() -> bool: return aura.pulse_count == 1, 0.65)
+	var affected := 0
+	for enemy in crowd:
+		if enemy.health < 10000.0:
+			affected += 1
+	check(crowd_hit and affected == 32 and aura.hit_count == 32, "One native pulse reaches all 32 enemies once, beyond the old 16-result query limit")
+	check(aura.cooldown_left <= 0.48 and aura.cooldown_left > 0.40, "The aura period respects the existing 40-percent cooldown floor")
+	await physics_wait(0.12)
+	check(aura.hit_count == 32, "The faster high-rank aura still cannot hit the same enemy twice within one pulse")
+	var emitter_ids: Array[int] = []
+	for emitter: GPUParticles3D in aura._emitters:
+		emitter_ids.append(emitter.get_instance_id())
+	visual_id = aura._visual.get_instance_id()
+	await until(func() -> bool: return aura.pulse_count >= 3, 1.1)
+	var same_emitters: bool = aura._visual.get_instance_id() == visual_id
+	for i in emitter_ids.size():
+		same_emitters = same_emitters and aura._emitters[i].get_instance_id() == emitter_ids[i]
+	check(same_emitters and aura.hit_count == 96, "Repeated pulses hit once per cycle and reuse all four original emitters instead of accumulating nodes")
+	scene.player.receive_damage({"damage": 10000, "dodged": false}, Vector3.ZERO)
+	await physics_wait(0.05)
+	var freed := not is_instance_id_valid(visual_id)
+	for instance_id in emitter_ids:
+		freed = freed and not is_instance_id_valid(instance_id)
+	check(scene.state == "lost" and freed and not is_instance_valid(aura._visual), "Death releases all aura particles and visuals even when the result pauses the tree")
+	await prepare(false)
+	scene.progression.skills.taiji_aura = 1
+	aura.refresh_skills()
+	var boss := enemy_at(Vector3(0, 0.04, -1.5), 1.0)
+	boss.boss = true
+	scene.boss = boss
+	var survivor := enemy_at(Vector3(1.5, 0.04, 0), 10000.0)
+	visual_id = aura._visual.get_instance_id()
+	var aura_won := await until(func() -> bool: return scene.state == "won", 1.5)
+	await physics_wait(0.05)
+	var survivor_health := survivor.health
+	await physics_wait(0.1)
+	check(aura_won and not is_instance_id_valid(visual_id) and not is_instance_valid(aura._visual) and survivor.health == survivor_health, "An aura boss kill safely ends its own overlap iteration, clears the effect and cannot damage after victory")
+	aura_checks_completed = true
+
 func check_gravity_movement() -> bool:
 	await prepare(false)
 	var target := enemy_at(Vector3(0, 0.04, -4), 10000.0)
@@ -1028,9 +1161,11 @@ func check_short_load() -> void:
 	scene.progression.skills.meteor = 1
 	scene.progression.skills.ghost = 1
 	scene.progression.skills.thunder_orb = 5
+	scene.progression.skills.taiji_aura = 5
 	scene.player.stats.cooldown_multiplier = 0.4
 	scene.storm.refresh_skills()
 	scene.orbs.refresh_skills()
+	scene.aura.refresh_skills()
 	scene.player.request_ghost()
 	for index in performance_enemies:
 		var angle := TAU * float(index) / float(performance_enemies)
@@ -1053,7 +1188,7 @@ func check_short_load() -> void:
 	performance = {
 		"requested": true,
 		"scope": "headless_logic_load_only_not_rendered_fps" if headless else "rendered_short_fixture_not_target_hardware_guarantee",
-		"fixture": "Real AI enemies, six chained swords, rank-five dark gravity wells at minimum cooldown, meteor and ghost unlocked, movement and one forced active cast per 1.25 seconds; elevated health prevents upgrade/death pauses.",
+		"fixture": "Real AI enemies, six chained swords, rank-five dark gravity wells and light Taiji aura at minimum cooldown, meteor and ghost unlocked, movement and one forced active cast per 1.25 seconds; elevated health prevents upgrade/death pauses.",
 		"requested_enemies": performance_enemies,
 		"remaining_enemies": get_tree().get_nodes_in_group("enemies").size(),
 		"simulation_seconds": 5.0,
@@ -1065,9 +1200,13 @@ func check_short_load() -> void:
 		"max_active_swords": max_active_swords,
 		"max_active_meteors": max_active_meteors,
 		"max_active_orbs": max_active_orbs,
+		"aura_particle_emitters": scene.aura._emitters.size(),
+		"aura_pulses": scene.aura.pulse_count,
+		"aura_hits": scene.aura.hit_count,
 	}
 	check(scene.state == "playing" and not get_tree().paused, "The short crowd-load fixture completes without a state lock or unexpected upgrade pause")
 	check(max_active_swords <= 6 and max_active_meteors <= 2 and max_active_orbs <= 9, "Crowd-load auxiliary concurrency stays within its authored limits")
+	check(scene.aura._emitters.size() == 4 and scene.aura.pulse_count >= 8 and scene.aura.hit_count > 0, "The full-load formation keeps four emitters and continues real damage beside all existing skills")
 	await capture("crowd-%d" % performance_enemies)
 
 func summarize(values: Array[float]) -> Dictionary:
