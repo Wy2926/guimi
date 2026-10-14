@@ -1,0 +1,11 @@
+Generated with the built-in image_gen tool; concept reference, not a gameplay screenshot.
+User revision: dark-element magical damage. The purple visual design is unchanged.
+
+Use case: stylized-concept
+Asset type: game-ready 3D spell asset concept reference for an existing dark fantasy 2.5D Godot arena game.
+Primary request: redesign the Thunder Binding Orb into a purple-lightning black-hole projectile. Create one polished concept sheet with two clearly separated views of THE SAME design: a compact flying orb with a short violet electrical wake, and its deployed larger stationary black hole pulling dust and small nearby enemy silhouettes inward.
+Subject: absolute-black spherical singularity, razor-thin bright lavender photon rim; layered tilted accretion ribbons swirling around the equator, two interrupted concentric orbit bands, sharply branching purple-white electricity hugging the spherical surface and leaping between bands. The center remains visibly dark, not a luminous solid ball. Multiple distinct VFX layers: fine inward-spiraling violet motes, smoky indigo vortex, sparse bright electrical sparks, a subtle circular ground influence boundary. Deployed form grows into a readable wide pulling field with arcing energy filaments converging inward. Silhouette must be legible at a steep overhead camera angle.
+Style/medium: highly refined realtime 3D game VFX concept render, sculptural model detail and material separation, dark fantasy stylized realism, not sci-fi machinery. Black obsidian-like void core, emissive amethyst / lavender filaments. Modelable separate core / rings / lightning parts.
+Composition/framing: landscape concept board, compact travel form at left in 3/4 view, large deployed form at right hovering over a simple dark stone arena patch seen from elevated 60 degree angle. Close enough to inspect layered geometry; black-purple background with subtle gray values that separate black core from background. No unrelated weapons or props.
+Lighting/mood: powerful controlled purple radiance, crisp sharp white-violet lightning highlights, layered readable details, no blown-out bloom.
+Constraints: no text, no labels, no logo, no watermark. This is a concept reference, not a screenshot of implemented gameplay.

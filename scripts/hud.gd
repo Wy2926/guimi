@@ -394,7 +394,7 @@ func _build_gameplay() -> void:
 	_make_skill("ghost", "厉鬼", "G / B")
 	_make_skill("swords", "万剑归宗", "被动")
 	_make_skill("meteor", "流星", "被动")
-	_make_skill("thunder_orb", "雷缚珠", "被动 · 固定光")
+	_make_skill("thunder_orb", "雷缚珠", "被动 · 暗魔法")
 	_hint = _label(column, "WASD / 左摇杆移动  ·  自动攻击  ·  击杀拾取经验，升级选择成长", 12, MUTED, HORIZONTAL_ALIGNMENT_CENTER)
 
 

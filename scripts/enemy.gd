@@ -41,6 +41,7 @@ var _warning: Node3D
 var _meshes: Array[MeshInstance3D] = []
 var _safe_velocity := Vector3.ZERO
 var _avoidance_ready := false
+var _gravity_wells: Array[Area3D] = []
 
 func configure(kind_name: String, stage: int, element_id: int, is_elite := false, is_boss := false) -> void:
 	kind = kind_name
@@ -195,9 +196,31 @@ func _physics_process(delta: float) -> void:
 			desired = _direction * stats.move_speed if distance > (4.5 if boss else 1.25) or not cast_visible else Vector3.ZERO
 		if _state == State.APPROACH:
 			_play("Walking_A" if desired.length_squared() > 0.01 else "Idle")
-	var requested := desired + (_push if _stagger_left <= 0.0 else Vector3.ZERO)
+	# Native areas register only their overlapping bodies. Multiple wells share one
+	# capped movement contribution; they never mutate stats or teleport the body.
+	var pull := Vector3.ZERO
+	var pull_limit := 0.0
+	var slow := 1.0
+	var resistance := 0.35 if elite else 1.0
+	for i in range(_gravity_wells.size() - 1, -1, -1):
+		var well := _gravity_wells[i]
+		if not is_instance_valid(well):
+			_gravity_wells.remove_at(i)
+			continue
+		var influence: float = well.influence_at(global_position) if not boss else 0.0
+		if influence <= 0.0:
+			continue
+		slow = minf(slow, 1.0 - well.SLOW_RATIO * resistance)
+		pull_limit = maxf(pull_limit, well.PULL_SPEED * resistance)
+		var inward: Vector3 = well.global_position - global_position
+		inward.y = 0.0
+		# Ease to a small central pocket without overshooting it in one physics tick.
+		var speed: float = minf(well.PULL_SPEED * resistance * influence, maxf(0.0, inward.length() - 0.25) / delta)
+		pull += inward.normalized() * speed
+	pull = pull.limit_length(pull_limit)
+	var requested := desired * (slow if _stagger_left <= 0.0 else 1.0) + pull + (_push if _stagger_left <= 0.0 else Vector3.ZERO)
 	requested.y = 0.0
-	var can_avoid := _state == State.APPROACH and _stagger_left <= 0.0 and _push.length_squared() < 0.01
+	var can_avoid := _state == State.APPROACH and _stagger_left <= 0.0 and _push.length_squared() < 0.01 and is_equal_approx(slow, 1.0)
 	# Native RVO works on the world's default map without a navigation mesh/path query.
 	avoidance.target_position = target.global_position
 	# Fixed windups, charge lanes and knockback are obstacles to approaching enemies.
@@ -214,6 +237,13 @@ func _physics_process(delta: float) -> void:
 		flat = flat.normalized() * (arena_radius - 0.5)
 		position.x = flat.x
 		position.z = flat.y
+
+func add_gravity_well(well: Area3D) -> void:
+	if not dead and not _gravity_wells.has(well):
+		_gravity_wells.append(well)
+
+func remove_gravity_well(well: Area3D) -> void:
+	_gravity_wells.erase(well)
 
 func _cache_safe_velocity(safe_velocity: Vector3) -> void:
 	# Never move from this callback: SceneTree pause must also freeze avoidance motion.

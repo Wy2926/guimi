@@ -220,7 +220,7 @@ func check_progression() -> void:
 	var authored_growth := true
 	for rank in range(1, 6):
 		authored_growth = authored_growth and sword_definition.count_at(rank) == rank + 1 and orb_definition.count_at(rank) == [1, 1, 2, 2, 3][rank - 1]
-	check(authored_growth and orb_definition.element == DamageRules.Element.LIGHT and orb_definition.radius_at(5) > orb_definition.radius_at(1) and orb_definition.visual_scale_at(5) > orb_definition.visual_scale_at(1), "Five authored skill ranks grow swords from two to six and fixed-light orbs from one to three with larger coverage")
+	check(authored_growth and orb_definition.element == DamageRules.Element.DARK and orb_definition.kind == DamageRules.Kind.MAGICAL and orb_definition.radius_at(5) > orb_definition.radius_at(1) and orb_definition.visual_scale_at(5) > orb_definition.visual_scale_at(1), "Five ranks grow swords from two to six and dark-magic black holes from one to three with larger coverage")
 	first.skills.slash = 5
 	ids.clear()
 	for option: Dictionary in first._available_choices():
@@ -334,7 +334,7 @@ func check_skill_upgrade_ui() -> void:
 		for option: Dictionary in pool:
 			if option.id == desired:
 				options.append(option)
-	check(options.size() == 3 and options[0].description.contains("5 → 6") and options[1].description.contains("2 → 3") and options[1].description.contains("光") and options[2].description.contains("雷缚珠"), "Upgrade cards expose sword and orb counts, larger coverage and the protected light element")
+	check(options.size() == 3 and options[0].description.contains("5 → 6") and options[1].description.contains("2 → 3") and options[1].description.contains("暗") and options[2].description.contains("雷缚珠"), "Upgrade cards expose sword and orb counts, larger coverage and the protected dark element")
 	scene.progression.choices = options
 	scene.progression.pending_levels = 1
 	scene._on_choices(options)
@@ -731,14 +731,15 @@ func check_thunder_orbs() -> void:
 	await prepare(false)
 	var target := enemy_at(Vector3(0, 0.04, -4.0), 10000.0)
 	await physics_wait(0.15)
-	check(scene.orbs.orbs.is_empty() and scene.orbs.cast_count == 0, "The locked light-orb passive cannot fire")
+	check(scene.orbs.orbs.is_empty() and scene.orbs.cast_count == 0, "The locked black-hole passive cannot fire")
 	scene.player.stats.magic_attack = 80.0
 	scene.player.stats.element = DamageRules.Element.FIRE
 	scene.player.stats.element_bonus[0] = 0.8
-	scene.player.stats.element_bonus[2] = 0.2
+	scene.player.stats.element_bonus[2] = 0.9
+	scene.player.stats.element_bonus[3] = 0.2
 	scene.player.stats.life_steal = 0.1
 	scene.player.health = 50.0
-	target.stats.resistances = [-0.2, 0.0, 0.4, 0.0]
+	target.stats.resistances = [-0.2, 0.0, -0.5, 0.4]
 	scene.progression.skills.ghost = 1
 	scene.player.request_ghost()
 	scene.progression.skills.thunder_orb = 1
@@ -749,79 +750,88 @@ func check_thunder_orbs() -> void:
 			received.append(result.duplicate())
 	scene.player.hit_confirmed.connect(record_hit)
 	var launched := await until(func() -> bool: return scene.orbs.cast_count == 1, 0.3)
-	check(launched and scene.orbs.orbs.size() == 1 and scene.player.attack_count == 0, "One light orb casts periodically without a basic attack or swing event")
+	check(launched and scene.orbs.orbs.size() == 1 and scene.player.attack_count == 0, "A black-hole orb casts without a basic attack")
 	if not launched or scene.orbs.orbs.is_empty():
 		scene.player.hit_confirmed.disconnect(record_hit)
 		return
 	var orb: Node3D = scene.orbs.orbs[0]
+	var start: Vector3 = orb.global_position
+	var orbit_visual := orb._visual.find_child("OuterOrbit", true, false) as Node3D
+	var initial_basis := orbit_visual.basis
 	await physics_wait(0.25)
-	await capture("thunder-orb-one")
+	check(orb.phase == orb.Phase.FLIGHT and orb.global_position.distance_to(start) > 0.5 and is_equal_approx(orb.current_radius, 0.72), "The compact orb travels before contact without applying its full field")
+	check(orb._visual.scene_file_path.ends_with("thunder_orb.glb") and orb._visual.find_children("*", "MeshInstance3D", true, false).size() == 9 and orb._animation.is_playing(), "The real projectile uses the Blender GLB, nine mesh batches and native orbit animation")
+	check(not orbit_visual.basis.is_equal_approx(initial_basis), "The imported orbit animation actually rotates the modeled accretion layers")
+	check(orb._trail.emitting and not orb._infall.emitting and not orb._mist.emitting, "Three native particle layers exist and inward particles wait for contact")
 	var landed := await until(func() -> bool: return not received.is_empty(), 2.0)
-	check(landed and received[0].element == DamageRules.Element.LIGHT and received[0].damage == 38 and scene.player.ghost_active, "A real orb retains light damage under fire enchantment and ghost, using light resistance rather than fire bonuses")
-	check(landed and scene.player.health > 50.0 and target._stagger_left > 0.0 and target._push.dot(orb.direction) > 4.0, "Orb hits reuse life steal and visibly stagger and push ordinary enemies along the projectile heading")
-	check(scene.storm.volley_count == 0 and scene.storm.meteor_rolls == 0, "Orb damage never recursively starts flying swords or meteor rolls")
-	if not is_instance_valid(orb):
-		scene.player.hit_confirmed.disconnect(record_hit)
-		return
-	# Keep the native Area over the target to verify sustained-overlap hit intervals.
-	orb.speed = 0.0
-	orb.global_position = target.global_position + Vector3.UP * 0.85
+	check(landed and received[0].element == DamageRules.Element.DARK and received[0].damage == 38 and scene.player.ghost_active, "Dark magic reads dark resistance and magic attack, ignoring fire enchantment, light bonuses and ghost")
+	check(landed and scene.player.health > 50.0 and target._stagger_left == 0.0 and target._push == Vector3.ZERO, "Dark ticks reuse life steal without knockback or hard stagger")
+	check(scene.storm.volley_count == 0 and scene.storm.meteor_rolls == 0, "Black holes never recursively trigger other passives")
+	var anchor: Vector3 = orb.global_position
+	var impact_radius: float = orb.current_radius
+	check(orb.phase == orb.Phase.WELL and orb.speed == 0.0 and impact_radius < orb.radius, "First native contact stops the projectile and starts expansion")
 	var hits_before: int = scene.orbs.hit_count
 	await physics_wait(0.15)
-	check(scene.orbs.hit_count == hits_before, "A single orb cannot damage the same overlapping enemy every physics tick")
+	check(scene.orbs.hit_count == hits_before and orb.current_radius > impact_radius and orb.current_radius < orb.radius, "Expansion is gradual and damage is not applied every physics tick")
 	await physics_wait(0.25)
-	check(scene.orbs.hit_count == hits_before + 1, "An enemy remaining inside the native orb area is hit again after its interval")
+	check(scene.orbs.hit_count == hits_before + 1, "A persistent overlap is damaged again after the 0.35-second interval")
+	await physics_wait(0.12)
+	check(orb.global_position == anchor and is_equal_approx(orb.current_radius, 2.6) and is_equal_approx(orb._shape.radius, 2.6), "The center stays anchored while native collision reaches the full 2.6-unit radius")
+	check(not orb._trail.emitting and orb._infall.emitting and orb._mist.emitting and orb._lightning.size() == 3, "Impact switches the wake to inward sparks and mist with three purple lightning layers")
 	scene.toggle_pause()
-	var frozen_position: Vector3 = orb.global_position
 	var frozen_life: float = orb.life_left
 	var frozen_age: float = orb.age
+	var frozen_animation: float = orb._animation.current_animation_position
 	var frozen_cooldown: float = scene.orbs.cooldown_left
 	var frozen_hits: int = scene.orbs.hit_count
 	await physics_wait(0.25)
-	check(orb.global_position == frozen_position and orb.life_left == frozen_life and orb.age == frozen_age and scene.orbs.cooldown_left == frozen_cooldown and scene.orbs.hit_count == frozen_hits, "Pause freezes orb movement, visual clock, lifetime, cooldown and contact damage")
+	check(orb.global_position == anchor and orb.life_left == frozen_life and orb.age == frozen_age and orb._animation.current_animation_position == frozen_animation and scene.orbs.cooldown_left == frozen_cooldown and scene.orbs.hit_count == frozen_hits, "Pause freezes field, shader clock, model animation, life, cooldown and damage")
 	scene.toggle_pause()
 	var old_radius: float = orb.radius
 	var old_coefficient: float = orb.coefficient
 	scene.progression.skills.thunder_orb = 5
 	scene.orbs.refresh_skills()
-	check(scene.orbs.orbs.has(orb) and orb.radius == old_radius and orb.coefficient == old_coefficient and scene.orbs.cooldown_left == frozen_cooldown, "Upgrading an orb preserves its live cast snapshot and remaining cooldown")
+	check(orb.radius == old_radius and orb.coefficient == old_coefficient and scene.orbs.cooldown_left == frozen_cooldown, "Upgrade preserves active well snapshots and cooldown")
 	scene.orbs.cooldown_left = 0.0
 	await physics_wait(0.04)
-	check(scene.orbs.cast_count == 2 and scene.orbs.orbs.size() == 4, "The next rank-five cast adds three orbs while the old orb completes its lifetime")
+	check(scene.orbs.cast_count == 2 and scene.orbs.orbs.size() == 4, "Rank five adds three projectiles without replacing the old well")
 	if scene.orbs.orbs.size() >= 4:
 		var second: Node3D = scene.orbs.orbs[1]
 		var third: Node3D = scene.orbs.orbs[2]
-		check(is_equal_approx(second.radius, 1.45) and is_equal_approx(second.visual_scale, 1.6), "Rank-five projectiles have the authored larger body and effect radius")
-		check(second.global_position.distance_to(third.global_position) > 1.1 and second.direction.dot(third.direction) > 0.999, "A three-orb cast separates its bodies into neighboring lanes without missing its sole target")
-		await capture("thunder-orb-three")
+		check(is_equal_approx(second.radius, 4.0) and is_equal_approx(second.visual_scale, 1.6), "Rank five has a four-unit field and 160-percent visual scale")
+		check(second.global_position.distance_to(third.global_position) > 1.1 and second.direction.dot(third.direction) > 0.999, "Multi-orb lanes use compact bodies, not expanded-field spacing")
 		var health_before := target.health
-		scene.orbs._control_cooldowns.clear()
 		scene.orbs.contact(target, second)
-		var first_push: Vector3 = target._push
-		target._push = Vector3.ZERO
 		scene.orbs.contact(target, third)
-		check(is_equal_approx(health_before - target.health, 138.0) and first_push.length() > 4.0 and target._push == Vector3.ZERO, "Two orbs deal independent damage but share the per-enemy knockback interval")
-		var elite := enemy_at(Vector3(4, 0.04, -4), 10000.0)
-		elite.elite = true
-		var boss_target := enemy_at(Vector3(-4, 0.04, -4), 10000.0)
-		boss_target.boss = true
-		scene.orbs.contact(elite, second)
-		scene.orbs.contact(boss_target, second)
-		check(is_equal_approx(elite._push.length(), 1.5) and is_equal_approx(elite._stagger_left, 0.035) and boss_target._push == Vector3.ZERO and boss_target._stagger_left == 0.0 and boss_target.health < 10000.0, "Orb control is reduced on elites and absent on bosses while their damage still applies")
+		check(is_equal_approx(health_before - target.health, 138.0) and target._push == Vector3.ZERO, "Two orbs deal independent dark damage without outward push")
 	scene.player.hit_confirmed.disconnect(record_hit)
 	scene.orbs.cooldown_left = 100.0
-	await until(func() -> bool: return scene.orbs.orbs.is_empty(), 4.2)
-	check(scene.orbs.orbs.is_empty(), "Every light orb expires and removes itself without accumulating projectiles")
+	await until(func() -> bool: return orb.phase == orb.Phase.COLLAPSE, 4.1)
+	check(orb.influence_at(target.global_position) == 0.0 and not target._gravity_wells.has(orb), "Collapse releases control before its visual tail completes")
+	check(scene.orbs.orbs.size() == 4 and scene.orbs.orbs[1].phase == orb.Phase.WELL and scene.orbs.orbs[2].phase == orb.Phase.WELL and scene.orbs.orbs[3].phase == orb.Phase.WELL, "All three rank-five lanes actually contact a single target and deploy their fields")
+	await until(func() -> bool: return scene.orbs.orbs.is_empty(), 4.5)
+	check(scene.orbs.orbs.is_empty(), "All black-hole fields and visual tails expire")
+	check((await check_gravity_movement()) == true, "Gravity movement checks reach completion without a skipped runtime error")
+
 	await prepare(false)
 	scene.progression.skills.thunder_orb = 1
 	scene.orbs.refresh_skills()
 	await physics_wait(0.25)
-	check(scene.orbs.cast_count == 0 and scene.orbs.cooldown_left == 0.0, "A ready periodic skill with no visible target does not waste its cooldown")
-	target = enemy_at(Vector3(0, 0.04, -13.0), 500.0)
+	check(scene.orbs.cast_count == 0 and scene.orbs.cooldown_left == 0.0, "A periodic skill with no visible target does not waste cooldown")
+	target = enemy_at(Vector3(0, 0.04, -13), 500.0)
 	await physics_wait(0.15)
-	check(scene.orbs.cast_count == 0, "The orb does not automatically launch at enemies beyond its targeting range")
+	check(scene.orbs.cast_count == 0, "Black holes do not launch beyond the targeting range")
 	target.position = Vector3(0, 0.04, -4)
-	await until(func() -> bool: return scene.orbs.cast_count > 0, 0.3)
+	await until(func() -> bool: return not scene.orbs.orbs.is_empty(), 0.3)
+	target.position = Vector3(10, 0.04, -4)
+	scene.orbs.cooldown_left = 100.0
+	await physics_wait(4.4)
+	check(scene.orbs.orbs.is_empty(), "A missed projectile expires without creating a field")
+	target.position = Vector3(0, 0.04, -4)
+	scene.orbs.cooldown_left = 0.0
+	await until(func() -> bool: return not scene.orbs.orbs.is_empty(), 0.3)
+	orb = scene.orbs.orbs[0]
+	await until(func() -> bool: return orb.phase == orb.Phase.WELL, 2.0)
 	var death_orbs: Array[int] = []
 	for current: Node3D in scene.orbs.orbs:
 		death_orbs.append(current.get_instance_id())
@@ -830,8 +840,67 @@ func check_thunder_orbs() -> void:
 	var expired_on_death: bool = scene.orbs.orbs.is_empty()
 	for instance_id in death_orbs:
 		expired_on_death = expired_on_death and not is_instance_id_valid(instance_id)
-	check(not death_orbs.is_empty() and scene.state == "lost" and expired_on_death, "Death cancels and frees every active orb even while the result pauses the tree")
+	check(not death_orbs.is_empty() and scene.state == "lost" and expired_on_death and target._gravity_wells.is_empty(), "Player death frees fields and particles and releases control even while the result pauses the tree")
 	orb_checks_completed = true
+
+func check_gravity_movement() -> bool:
+	await prepare(false)
+	var target := enemy_at(Vector3(0, 0.04, -4), 10000.0)
+	scene.progression.skills.thunder_orb = 1
+	scene.orbs.refresh_skills()
+	await until(func() -> bool: return not scene.orbs.orbs.is_empty(), 0.3)
+	var orb: Node3D = scene.orbs.orbs[0]
+	await until(func() -> bool: return orb.phase == orb.Phase.WELL, 2.0)
+	scene.orbs.cooldown_left = 100.0
+	await physics_wait(0.48)
+	var center: Vector3 = orb.global_position
+	center.y = 0.04
+	var ordinary := enemy_at(center + Vector3(1.8, 0, 0), 10000.0, "charger")
+	var elite := enemy_at(center + Vector3(1.8, 0, 0), 10000.0, "charger")
+	elite.elite = true
+	var boss_target := enemy_at(center + Vector3(1.8, 0, 0), 10000.0, "charger")
+	boss_target.boss = true
+	var outside := enemy_at(center + Vector3(3.5, 0, 0), 10000.0)
+	await physics_wait(0.06)
+	check(ordinary._gravity_wells.has(orb) and outside._gravity_wells.is_empty() and outside.health == 10000.0, "The expanded native area includes nearby enemies and excludes enemies outside it")
+	for body in [ordinary, elite, boss_target]:
+		body._state = ArenaEnemy.State.CHARGE
+		body._state_left = 10.0
+		body._direction = Vector3.FORWARD
+		body._physics_process(1.0 / 120.0)
+	check(is_equal_approx(ordinary.velocity.z, -4.5) and ordinary.velocity.x < -2.0 and ordinary.stats.move_speed > 2.0, "Ordinary enemies receive 55-percent slow and inward velocity without changing stats")
+	check(is_equal_approx(elite.velocity.z, -8.075) and elite.velocity.x < -0.5 and absf(elite.velocity.x) < absf(ordinary.velocity.x), "Elite slow and pull use 35-percent control strength")
+	check(is_equal_approx(boss_target.velocity.z, -10.0) and is_zero_approx(boss_target.velocity.x), "Bosses are immune to slowing and displacement")
+	scene.orbs.contact(boss_target, orb)
+	check(boss_target.health < 10000.0, "Control immunity does not prevent dark damage")
+	ordinary._state = ArenaEnemy.State.APPROACH
+	ordinary._attack_left = 100.0
+	ordinary.set_physics_process(true)
+	var distance_before := ordinary.global_position.distance_to(center)
+	await physics_wait(0.22)
+	check(ordinary.global_position.distance_to(center) < distance_before - 0.25, "Live AI and native movement pull an enemy closer over multiple ticks")
+	ordinary.set_physics_process(false)
+	var gravity_targets: Array[Node3D] = [target]
+	for i in 2:
+		scene.orbs._cast(gravity_targets)
+		var extra: Node3D = scene.orbs.orbs.back()
+		extra.global_position = orb.global_position
+		extra._anchor()
+	scene.orbs.cooldown_left = 100.0
+	ordinary.global_position = center + Vector3(1.8, 0, 0)
+	await physics_wait(0.50)
+	ordinary._state = ArenaEnemy.State.CHARGE
+	ordinary._state_left = 10.0
+	ordinary._direction = Vector3.FORWARD
+	ordinary._physics_process(1.0 / 120.0)
+	check(ordinary._gravity_wells.size() == 3 and is_equal_approx(ordinary.velocity.z, -4.5) and absf(ordinary.velocity.x) <= orb.PULL_SPEED + 0.001, "Three overlapping wells do not stack slow or exceed the pull-speed cap")
+	ordinary.global_position = center + Vector3(4, 0, 0)
+	await physics_wait(0.06)
+	ordinary._physics_process(1.0 / 120.0)
+	check(ordinary._gravity_wells.is_empty() and is_equal_approx(ordinary.velocity.z, -10.0) and is_zero_approx(ordinary.velocity.x), "Leaving the areas restores normal movement")
+	scene.orbs._clear_orbs()
+	check(elite._gravity_wells.is_empty() and boss_target._gravity_wells.is_empty(), "Cancellation immediately removes every field source from surviving enemies")
+	return true
 
 func check_crowd_hits() -> void:
 	await prepare(false)
@@ -984,7 +1053,7 @@ func check_short_load() -> void:
 	performance = {
 		"requested": true,
 		"scope": "headless_logic_load_only_not_rendered_fps" if headless else "rendered_short_fixture_not_target_hardware_guarantee",
-		"fixture": "Real AI enemies, six chained swords, rank-five light orbs at minimum cooldown, meteor and ghost unlocked, movement and one forced active cast per 1.25 seconds; elevated health prevents upgrade/death pauses.",
+		"fixture": "Real AI enemies, six chained swords, rank-five dark gravity wells at minimum cooldown, meteor and ghost unlocked, movement and one forced active cast per 1.25 seconds; elevated health prevents upgrade/death pauses.",
 		"requested_enemies": performance_enemies,
 		"remaining_enemies": get_tree().get_nodes_in_group("enemies").size(),
 		"simulation_seconds": 5.0,

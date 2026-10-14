@@ -1,12 +1,10 @@
 extends Node3D
-## One authored automatic passive: visible targets, straight projectiles and shared control limits.
+## One authored passive: visible targets, straight projectiles and contact-triggered gravity wells.
 
 const ORB_SCRIPT = preload("res://scripts/thunder_orb.gd")
 const SKILL_ID := "thunder_orb"
 const TARGET_RANGE := 10.0
 const MAX_ORBS := 9
-const CONTROL_INTERVAL := 0.35
-const SLOT_RADIUS_RATIO := 0.8
 
 var player: DuelFighter
 var progression: RunProgression
@@ -18,7 +16,6 @@ var cast_count := 0
 var hit_count := 0
 
 var _level := 0
-var _control_cooldowns: Dictionary = {}
 
 func _ready() -> void:
 	refresh_skills()
@@ -32,7 +29,6 @@ func refresh_skills() -> void:
 
 func reset() -> void:
 	_clear_orbs()
-	_control_cooldowns.clear()
 	cooldown_left = 0.0
 	cast_count = 0
 	hit_count = 0
@@ -50,12 +46,6 @@ func _physics_process(delta: float) -> void:
 		if not orbs.is_empty():
 			_clear_orbs()
 		return
-	for target_id in _control_cooldowns.keys():
-		var remaining: float = float(_control_cooldowns[target_id]) - delta
-		if remaining <= 0.0:
-			_control_cooldowns.erase(target_id)
-		else:
-			_control_cooldowns[target_id] = remaining
 	cooldown_left = maxf(0.0, cooldown_left - delta)
 	if _level <= 0 or cooldown_left > 0.0 or orbs.size() >= MAX_ORBS:
 		return
@@ -95,7 +85,7 @@ func _cast(targets: Array[Node3D]) -> void:
 		center_direction = player.facing
 	center_direction = center_direction.normalized()
 	var side := center_direction.cross(Vector3.UP)
-	var spacing := definition.radius_at(_level) * player.stats.range_multiplier * SLOT_RADIUS_RATIO
+	var spacing := ORB_SCRIPT.FLIGHT_RADIUS * definition.visual_scale_at(_level) * player.stats.range_multiplier
 	var half_width := float(amount - 1) * spacing * 0.5
 	var origin := player.global_position + Vector3.UP * 0.85 + center_direction * 0.65
 	# Move the whole row inward near the arena rim; clamping slots separately would merge them.
@@ -129,14 +119,11 @@ func _cast(targets: Array[Node3D]) -> void:
 func contact(target: Node3D, orb: Node3D) -> void:
 	if not is_instance_valid(player) or player.dead or not player.enabled or not is_instance_valid(target) or target.dead or not orbs.has(orb):
 		return
-	var target_id := target.get_instance_id()
-	var apply_control := not _control_cooldowns.has(target_id)
 	# No ghost multiplier and no swing event: auxiliary hits never roll other passives.
-	var result := player.deal_damage(target, orb.kind, orb.coefficient, orb.element, true, false, "雷缚珠", orb.direction, apply_control)
+	# Gravity is continuous movement control, not repeated knockback/stagger on each hit.
+	var result := player.deal_damage(target, orb.kind, orb.coefficient, orb.element, false, false, "雷缚珠", orb.direction, false)
 	if float(result.get("actual", 0.0)) > 0.0:
 		hit_count += 1
-		if apply_control:
-			_control_cooldowns[target_id] = CONTROL_INTERVAL
 		if is_instance_valid(orb):
 			orb.flash_hit()
 
