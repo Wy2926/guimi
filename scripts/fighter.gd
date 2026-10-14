@@ -335,14 +335,20 @@ func _resolve_direct_hit(target: Node3D, result: Dictionary, prior_states: Dicti
 					if int(target.statuses.shock.charges) <= 0:
 						target.remove_status("shock")
 				for neighbor: Node3D in reaction_targets(target, 3.0, 3):
-					shock_owner.deal_damage(neighbor, DamageRules.Kind.MAGICAL, 0.30 * float(shocked.potency), DamageRules.Element.LIGHT, false, false, "感电传导", Vector3.ZERO, false, {"secondary": true, "skill_id": String(shocked.skill_id)})
+					var conducted := shock_owner.deal_damage(neighbor, DamageRules.Kind.MAGICAL, 0.30 * float(shocked.potency), DamageRules.Element.LIGHT, false, false, "感电传导", Vector3.ZERO, false, {"secondary": true, "skill_id": String(shocked.skill_id)})
+					if float(conducted.get("actual", 0.0)) > 0.0 and is_instance_valid(feedback):
+						feedback.shock_chain(target.global_position + Vector3.UP * 0.8, neighbor.global_position + Vector3.UP * 0.8)
 				reaction_count += 1
 		if not Dictionary(prior_states.get("freeze", {})).is_empty() and (int(result.element) == DamageRules.Element.FIRE or int(result.kind) in [DamageRules.Kind.PHYSICAL, DamageRules.Kind.FIXED]):
 			target.remove_status("freeze")
+			if is_instance_valid(feedback):
+				feedback.ice_shatter(target.global_position, 3.0)
 			var victims := reaction_targets(target, 3.0, 3)
 			victims.push_front(target)
 			for victim: Node3D in victims:
-				deal_damage(victim, DamageRules.Kind.MAGICAL, 0.35, DamageRules.Element.ICE, false, false, "破冰", Vector3.ZERO, false, {"secondary": true, "skill_id": id})
+				var shattered := deal_damage(victim, DamageRules.Kind.MAGICAL, 0.35, DamageRules.Element.ICE, false, false, "破冰", Vector3.ZERO, false, {"secondary": true, "skill_id": id})
+				if float(shattered.get("actual", 0.0)) > 0.0 and is_instance_valid(feedback):
+					feedback.ice_contact(victim.global_position + Vector3.UP * 0.8)
 			reaction_count += 1
 		if enabled and not target.dead and not definition.status.is_empty():
 			target.apply_status(definition.status, self, id, definition.status_duration)

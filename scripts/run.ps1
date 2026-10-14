@@ -3,12 +3,14 @@ param(
     [switch]$Editor,
     [switch]$Verify,
     [switch]$HuntianDemo,
+    [switch]$CombatDemo,
     [ValidateSet(60, 120)][int]$VerifyFps = 120,
     [ValidateRange(1, 80)][int]$PerfEnemies = 80,
     [switch]$Headless
 )
 $ErrorActionPreference = 'Stop'
 if ($HuntianDemo -and ($Verify -or $Editor)) { throw '-HuntianDemo cannot be combined with -Verify or -Editor.' }
+if ($CombatDemo -and ($Verify -or $Editor -or $HuntianDemo)) { throw '-CombatDemo cannot be combined with -Verify, -Editor or -HuntianDemo.' }
 $projectPath = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $candidates = @(
     $Godot,
@@ -38,6 +40,7 @@ if ($Verify) {
     $arguments += @('--', '--verify', "--fps=$VerifyFps", "--perf-enemies=$PerfEnemies")
 }
 if ($HuntianDemo) { $arguments += @('--', '--huntian-demo') }
+if ($CombatDemo) { $arguments += @('--', '--combat-demo', "--fps=$VerifyFps") }
 & $engine @arguments | Out-Host
 if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) {
     throw "Godot exited with code $LASTEXITCODE."

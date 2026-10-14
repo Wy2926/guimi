@@ -22,6 +22,9 @@ var parent_inverses: Array[Transform3D] = []
 var meshes: Array[MeshInstance3D] = []
 var energy_meshes: Array[MeshInstance3D] = []
 var emitters: Array[GPUParticles3D] = []
+var fire_emitters: Array[GPUParticles3D] = []
+var carrying_fire := false
+var seam_material: ShaderMaterial
 var history: Array[Vector3] = []
 var history_distances: Array[float] = []
 var trajectory := Curve3D.new()
@@ -46,17 +49,17 @@ func _ready() -> void:
 		rest_bases.append((skeleton.global_transform*skeleton.get_bone_global_rest(bone)).basis)
 		var parent := skeleton.get_bone_parent(bone)
 		parent_inverses.append(skeleton.get_bone_global_rest(parent).affine_inverse() if parent >= 0 else Transform3D.IDENTITY)
-	var material := ShaderMaterial.new()
-	material.shader = ENERGY
-	material.set_shader_parameter("tint", Color("f5a14a"))
-	material.set_shader_parameter("layer", 0.0)
+	seam_material = ShaderMaterial.new()
+	seam_material.shader = ENERGY
+	seam_material.set_shader_parameter("tint", Color("f5a14a"))
+	seam_material.set_shader_parameter("layer", 0.0)
 	for mesh: MeshInstance3D in model.find_children("*", "MeshInstance3D", true, false):
 		meshes.append(mesh)
 		mesh.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 		for surface in mesh.mesh.get_surface_count():
 			var original := mesh.mesh.surface_get_material(surface)
 			if original != null and "SpiritSeam" in original.resource_name:
-				mesh.set_surface_override_material(surface, material)
+				mesh.set_surface_override_material(surface, seam_material)
 				energy_meshes.append(mesh)
 	trajectory.bake_interval = 0.035
 	model.hide()
@@ -108,7 +111,7 @@ func _physics_process(delta: float) -> void:
 	_pose_body()
 	for mesh in energy_meshes:
 		mesh.set_instance_shader_parameter("visual_time", age)
-		mesh.set_instance_shader_parameter("power", flash)
+		mesh.set_instance_shader_parameter("power", flash + (0.35 if carrying_fire else 0.0))
 	emitters[2].set_instance_shader_parameter("visual_time", age)
 	emitters[2].set_instance_shader_parameter("power", 0.24+flash*0.25)
 
@@ -189,8 +192,36 @@ func strike() -> void:
 func hit() -> void:
 	flash = 1.0
 
+func set_carried_fire(enabled: bool) -> void:
+	# Presentation follows the executor's existing burn snapshot, never a
+	# separate lifetime. Both wakes are emitted by this actual moving head;
+	# the warm seam is the original skinned cloth, not a duplicate fire ribbon.
+	enabled = enabled and not dissolving
+	if carrying_fire == enabled:
+		return
+	carrying_fire = enabled
+	if enabled and fire_emitters.is_empty():
+		for layer in 2:
+			var particles: GPUParticles3D = feedback.attach_trail(self, Color("ff7439") if layer == 0 else Color("ffe3a6"), 12 if layer == 0 else 8, 0.38 if layer == 0 else 0.52)
+			particles.name = "CarryFireFilaments" if layer == 0 else "CarryFireEmbers"
+			var process := particles.process_material as ParticleProcessMaterial
+			process.direction = Vector3.UP
+			process.spread = 22.0 if layer == 0 else 48.0
+			process.initial_velocity_min = 0.18
+			process.initial_velocity_max = 0.75 if layer == 0 else 1.1
+			process.gravity = Vector3(0, 0.55, 0)
+			process.particle_flag_align_y = true
+			var spark := particles.draw_pass_1 as SphereMesh
+			spark.radius = 0.022 if layer == 0 else 0.012
+			spark.height = 0.24 if layer == 0 else 0.045
+			fire_emitters.append(particles)
+	seam_material.set_shader_parameter("tint", Color("ff6834") if enabled else Color("f5a14a"))
+	for particles in fire_emitters:
+		particles.emitting = enabled
+
 func dissolve() -> void:
 	trace_path()
+	set_carried_fire(false)
 	dissolving = true
 	for particles in emitters:
 		particles.emitting = false

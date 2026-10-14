@@ -28,6 +28,14 @@ var ribbon_checks_completed := false
 var divinity_checks_completed := false
 var status_checks_completed := false
 var fate_checks_completed := false
+var status_fx_checks_completed := false
+var reaction_fx_checks_completed := false
+var artifact_fx_checks_completed := false
+var combat_demo_checks_completed := false
+var max_status_fx_roots := 0
+var max_status_fx_particle_slots := 0
+var max_reaction_fx_roots := 0
+var max_reaction_fx_particle_slots := 0
 var max_ribbon_particle_slots := 0
 var max_ribbon_spine_bones := 0
 var max_ribbon_history_points := 0
@@ -62,6 +70,20 @@ func _process(delta: float) -> void:
 	max_active_swords = maxi(max_active_swords, scene.storm.active_swords)
 	max_active_meteors = maxi(max_active_meteors, scene.storm.meteors.size())
 	max_active_orbs = maxi(max_active_orbs, scene.orbs.orbs.size())
+	var status_roots := 0
+	var status_slots := 0
+	for enemy: ArenaEnemy in scene.enemies.get_children():
+		status_roots += enemy._status_visuals.size()
+		for root: Node3D in enemy._status_visuals.values():
+			status_slots += int(root.get_meta("particle_slots", 0))
+	max_status_fx_roots = maxi(max_status_fx_roots, status_roots)
+	max_status_fx_particle_slots = maxi(max_status_fx_particle_slots, status_slots)
+	var reaction_slots := 0
+	var reactions := reaction_nodes()
+	for root in reactions:
+		reaction_slots += fx_particle_slots(root)
+	max_reaction_fx_roots = maxi(max_reaction_fx_roots, reactions.size())
+	max_reaction_fx_particle_slots = maxi(max_reaction_fx_particle_slots, reaction_slots)
 	if not scene.storm.ribbon.is_empty():
 		max_ribbon_spine_bones = maxi(max_ribbon_spine_bones, scene.storm.ribbon.visual.spine_bones.size())
 		max_ribbon_history_points = maxi(max_ribbon_history_points, scene.storm.ribbon.visual.history.size())
@@ -167,6 +189,11 @@ func run() -> void:
 		finish_report()
 		return
 	scene.set_frame_limit(requested_fps)
+	if "--combat-demo" in OS.get_cmdline_user_args():
+		await check_combat_demo()
+		check(combat_demo_checks_completed, "The full-artifact demo checks reach completion")
+		finish_report()
+		return
 	if "--huntian-demo" in OS.get_cmdline_user_args():
 		await huntian_demo()
 		return
@@ -199,6 +226,12 @@ func run() -> void:
 	check(status_checks_completed, "Abnormal-state and artifact-reaction checks finish without a skipped runtime error")
 	await check_fates_and_evolution()
 	check(fate_checks_completed, "Fate and evolution checks finish without a skipped runtime error")
+	await check_status_presentation()
+	check(status_fx_checks_completed, "Dedicated abnormal-state presentation checks reach completion")
+	await check_reaction_presentation()
+	check(reaction_fx_checks_completed, "Accepted-target reaction presentation checks reach completion")
+	await check_artifact_presentation()
+	check(artifact_fx_checks_completed, "Sash, evolved sword and accepted fate presentation checks reach completion")
 	await check_incoming_damage()
 	await check_pickups_and_choices()
 	await check_pause()
@@ -216,6 +249,8 @@ func run() -> void:
 	await check_crowd_hits()
 	await check_restart()
 	await check_waves_and_endings()
+	await check_combat_demo()
+	check(combat_demo_checks_completed, "The full-artifact demo checks reach completion")
 	if performance_enemies > 0:
 		await check_short_load()
 	finish_report()
@@ -776,6 +811,7 @@ func check_fates_and_evolution() -> void:
 	scene.progression.fates.crit_seal = 1
 	scene.player.deal_damage(target, DamageRules.Kind.PHYSICAL, 1.0)
 	check(scene.storm.meteor_count == 1 and scene.storm.meteors.size() == 1 and scene.storm.meteors[0].secondary and scene.storm.meteor_cooldown == 100.0, "Critical-seal fate requests the existing secondary seal executor without replacing its autonomous cooldown")
+	check(reaction_nodes("FateSeal").size() == 1, "An accepted real critical-fate cast displays exactly one distinct seal invocation cue")
 	scene.player.deal_damage(target, DamageRules.Kind.PHYSICAL, 1.0)
 	check(scene.storm.meteor_count == 1, "The critical fate's shared cooldown prevents repeated-contact cast spam")
 	scene.player.fate_cooldown = 0.0
@@ -806,6 +842,356 @@ func check_fates_and_evolution() -> void:
 	var extra_hits: int = scene.storm.sword_hits - hits_before
 	check(extra_hits > 0 and extra_hits <= 63 and scene.storm.active_swords <= 7, "Seven evolved swords retain minimum travel and contact timing instead of oscillating into hundreds of hits per second (%d hits in two seconds)" % extra_hits)
 	fate_checks_completed = true
+
+func fx_particle_slots(root: Node) -> int:
+	var slots := 0
+	for emitter: GPUParticles3D in root.find_children("*", "GPUParticles3D", true, false):
+		slots += emitter.amount
+	return slots
+
+func reaction_nodes(kind: String = "") -> Array[Node3D]:
+	var roots: Array[Node3D] = []
+	for node in scene.feedback.get_children():
+		if node is Node3D and not node.is_queued_for_deletion() and node.get_meta("reaction_fx", false) and (kind.is_empty() or String(node.name).begins_with(kind)):
+			roots.append(node)
+	return roots
+
+func reaction_line_ends(root: Node3D, child_name: String) -> Array[Vector3]:
+	var line := root.get_node_or_null(child_name) as MeshInstance3D
+	if line == null or line.mesh.get_surface_count() == 0:
+		return []
+	var arrays := line.mesh.surface_get_arrays(0)
+	var vertices: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+	if vertices.size() < 4:
+		return []
+	return [line.to_global((vertices[0] + vertices[1]) * 0.5), line.to_global((vertices[-2] + vertices[-1]) * 0.5)]
+
+func check_status_presentation() -> void:
+	await prepare(false)
+	var target := enemy_at(Vector3(0, 0.04, -4), 10000.0)
+	var sources := {"burn": "meteor", "bleed": "swords", "poison": "thunder_orb", "shock": "taiji_aura", "curse": "thunder_orb", "freeze": "huntian_ling", "bind": "huntian_ling", "stun": "huntian_ling"}
+	var roots: Array[int] = []
+	var animated_shapes: Array[Node3D] = []
+	var reused := true
+	var bounded := true
+	for id: String in ArenaEnemy.STATUS_RULES:
+		check(target.apply_status(id, scene.player, sources[id], 3.0), "A real receiver accepts the dedicated " + id + " presentation fixture")
+		var root := target._status_visuals.get(id) as Node3D
+		check(is_instance_valid(root) and root.get_parent() == target and root.get_meta("status_id", "") == id, "The " + id + " effect belongs to the same receiver-owned abnormal state")
+		if not is_instance_valid(root):
+			bounded = false
+			continue
+		roots.append(root.get_instance_id())
+		var emitter_ids: Array[int] = []
+		var emitters := root.find_children("*", "GPUParticles3D", true, false)
+		for emitter: GPUParticles3D in emitters:
+			emitter_ids.append(emitter.get_instance_id())
+			bounded = bounded and emitter.local_coords and emitter.amount <= 8 and emitter.visibility_aabb.has_point(Vector3.ZERO) and emitter.visibility_aabb.size.length() <= 12.0
+		check(emitters.size() >= 2 and fx_particle_slots(root) == 16 and int(root.get_meta("particle_slots", 0)) == 16, "The " + id + " effect uses two lightweight particle layers within its authored sixteen-slot budget")
+		for shape: MeshInstance3D in root.find_children("*", "MeshInstance3D", true, false):
+			animated_shapes.append(shape)
+		for refresh in 5:
+			var accepted := target.apply_status(id, scene.player, sources[id], 3.0)
+			reused = reused and accepted == (id not in ArenaEnemy.CONTROL_STATUSES) and target._status_visuals.get(id) == root
+		var refreshed_ids: Array[int] = []
+		for emitter: GPUParticles3D in root.find_children("*", "GPUParticles3D", true, false):
+			refreshed_ids.append(emitter.get_instance_id())
+		reused = reused and emitter_ids == refreshed_ids
+	check(bounded and target._status_visuals.size() == 8 and fx_particle_slots(target) == 128, "All eight dedicated effects coexist within one sixteen-slot root per state with bounded local particle culling")
+	check(reused and not is_instance_valid(target._control_immune_visual), "Status refreshes retain the exact roots and emitters; an already-active control creates no false immunity flash")
+	var before: Array[Transform3D] = []
+	for shape in animated_shapes:
+		before.append(shape.global_transform)
+	await physics_wait(0.12)
+	var moved := false
+	for index in animated_shapes.size():
+		moved = moved or not animated_shapes[index].global_transform.is_equal_approx(before[index])
+		before[index] = animated_shapes[index].global_transform
+	var remaining: float = target.get_status("burn").remaining
+	scene.toggle_pause()
+	await physics_wait(0.20)
+	target.advance_statuses(0.20)
+	var frozen: bool = target.get_status("burn").remaining == remaining
+	for index in animated_shapes.size():
+		frozen = frozen and animated_shapes[index].global_transform.is_equal_approx(before[index])
+	check(moved and frozen, "Native status shape motion visibly advances in simulation and freezes together with its receiver state during pause")
+	scene.toggle_pause()
+	scene.player.enabled = false
+	target.advance_statuses(0.01)
+	scene.player.enabled = true
+	await physics_wait(0.04)
+	var cleared := target.statuses.is_empty() and target._status_visuals.is_empty()
+	for instance_id in roots:
+		cleared = cleared and not is_instance_id_valid(instance_id)
+	check(cleared, "Disabling the source removes all eight status-owned effects instead of leaving emitting orphan roots")
+	var expiring := enemy_at(Vector3(5, 0.04, -4), 10000.0)
+	roots.clear()
+	for id: String in ArenaEnemy.STATUS_RULES:
+		expiring.apply_status(id, scene.player, sources[id], 0.05)
+		var root := expiring._status_visuals.get(id) as Node3D
+		if is_instance_valid(root):
+			roots.append(root.get_instance_id())
+	expiring.advance_statuses(0.06)
+	await physics_wait(0.04)
+	cleared = roots.size() == 8 and expiring._status_visuals.is_empty() and expiring.statuses.is_empty()
+	for instance_id in roots:
+		cleared = cleared and not is_instance_id_valid(instance_id)
+	check(cleared, "Natural expiry frees every dedicated status effect through the existing receiver lifecycle")
+	var dying := enemy_at(Vector3(-6, 0.04, -5), 100.0)
+	roots.clear()
+	for id: String in ArenaEnemy.STATUS_RULES:
+		dying.apply_status(id, scene.player, sources[id], 3.0)
+		var root := dying._status_visuals.get(id) as Node3D
+		if is_instance_valid(root):
+			roots.append(root.get_instance_id())
+	scene.player.deal_damage(dying, DamageRules.Kind.FIXED, 100.0)
+	await physics_wait(0.04)
+	cleared = dying.dead and dying._status_visuals.is_empty() and dying.statuses.is_empty()
+	for instance_id in roots:
+		cleared = cleared and not is_instance_id_valid(instance_id)
+	check(cleared, "Lethal damage clears all dedicated status shapes and particle emitters before corpse cleanup")
+	var boss_target := enemy_at(Vector3(6, 0.04, 2), 10000.0, "boss")
+	check(not boss_target.apply_status("freeze", scene.player, "huntian_ling") and boss_target._status_visuals.is_empty(), "Boss control immunity never displays a successful frozen state")
+	var immunity := boss_target._control_immune_visual as Node3D
+	var immunity_id := immunity.get_instance_id() if is_instance_valid(immunity) else 0
+	for id: String in ["bind", "stun", "freeze"]:
+		boss_target.apply_status(id, scene.player, "huntian_ling")
+	check(immunity_id != 0 and boss_target._control_immune_visual == immunity and immunity.get_meta("reason", "") == "boss", "Repeated boss control rejection reuses one brief immunity cue rather than spawning success effects")
+	target.advance_statuses(1.1)
+	target.apply_status("bind", scene.player, "huntian_ling")
+	target.remove_status("bind")
+	check(not target.apply_status("bind", scene.player, "huntian_ling") and not target._status_visuals.has("bind") and is_instance_valid(target._control_immune_visual) and target._control_immune_visual.get_meta("reason", "") == "recovery", "Control recovery shows only a rejected-control cue and never restores the consumed binding effect")
+	var recovery_id: int = target._control_immune_visual.get_instance_id() if is_instance_valid(target._control_immune_visual) else 0
+	await physics_wait(0.85)
+	check(not is_instance_id_valid(immunity_id) and not is_instance_id_valid(recovery_id), "Boss and recovery immunity cues clean themselves up with native bound tweens")
+	status_fx_checks_completed = true
+
+func check_reaction_presentation() -> void:
+	await prepare(false)
+	scene.storm.set_physics_process(false)
+	scene.progression.skills.swords = 1
+	scene.player.stats.magic_attack = 100.0
+	var target := enemy_at(Vector3(0, 0.04, -4), 10000.0)
+	var accepted := enemy_at(Vector3(-1, 0.04, -4), 10000.0)
+	var dodger := enemy_at(Vector3(1, 0.04, -4), 10000.0)
+	dodger.stats.dodge_chance = 1.0
+	target.apply_status("shock", scene.player, "taiji_aura")
+	scene.player.deal_fabao_damage(target, "swords")
+	var chains := reaction_nodes("ShockChain")
+	check(chains.size() == 1 and accepted.health == 9970.0 and dodger.health == 10000.0, "Shock creates one actual-target connection and no false line or contact sparks on an evading recipient")
+	if not chains.is_empty():
+		var root := chains[0]
+		var ends := reaction_line_ends(root, "ShockCore")
+		check(ends.size() == 2 and ends[0].is_equal_approx(target.global_position + Vector3.UP * 0.8) and ends[1].is_equal_approx(accepted.global_position + Vector3.UP * 0.8), "The native shock strip starts and ends on the two actual receivers, not on a decorative nearby point")
+		check(root.find_children("*", "GPUParticles3D", true, false).size() == 2 and fx_particle_slots(root) == 20 and root.find_children("*", "OmniLight3D", true, false).is_empty(), "Shock adds two bounded directional particle layers without adding a scene light")
+		var core := root.get_node("ShockCore") as MeshInstance3D
+		await physics_wait(0.06)
+		var fade: float = core.transparency
+		var root_id := root.get_instance_id()
+		scene.toggle_pause()
+		await physics_wait(0.16)
+		check(is_instance_id_valid(root_id) and core.transparency == fade and fade > 0.0, "Pause freezes the native reaction fade at the same visible moment instead of consuming its lifetime")
+		scene.toggle_pause()
+		await physics_wait(0.62)
+		check(not is_instance_id_valid(root_id) and reaction_nodes("ShockChain").is_empty(), "The shock strip and its particles expire together after simulation resumes")
+
+	await prepare(false)
+	target = enemy_at(Vector3(0, 0.04, -4), 100.0)
+	var recipients: Array[ArenaEnemy] = []
+	for offset: Vector3 in [Vector3(1, 0, 0), Vector3(-1.5, 0, 0), Vector3(0, 0, 2), Vector3(0, 0, -2.9)]:
+		recipients.append(enemy_at(target.global_position + offset, 10000.0))
+	target.apply_status("curse", scene.player, "thunder_orb")
+	for pair: Array in [["burn", "meteor"], ["poison", "thunder_orb"], ["bleed", "swords"]]:
+		target.apply_status(pair[0], scene.player, pair[1], 3.0)
+	scene.player.deal_damage(target, DamageRules.Kind.FIXED, 100.0)
+	var spread := reaction_nodes("CurseSpread")
+	check(spread.size() == 3 and recipients[3].statuses.is_empty(), "Cursed death shows one travelling curse thread per accepted recipient, not one thread for each of three inherited states")
+	var destinations: Array[Vector3] = []
+	var spread_budget := true
+	for root in spread:
+		var ends := reaction_line_ends(root, "CurseThread")
+		if ends.size() == 2:
+			destinations.append(ends[1])
+		spread_budget = spread_budget and ends.size() == 2 and fx_particle_slots(root) == 20 and root.find_children("*", "GPUParticles3D", true, false).size() == 2
+	for index in 3:
+		var matched := false
+		for point in destinations:
+			matched = matched or point.is_equal_approx(recipients[index].global_position + Vector3.UP * 0.8)
+		spread_budget = spread_budget and matched
+	check(spread_budget, "Every curse path terminates at one of the three real recipients and shares the bounded two-layer particle budget")
+	recipients[0].apply_status("curse", scene.player, "thunder_orb")
+	scene.player.deal_damage(recipients[0], DamageRules.Kind.FIXED, 10000.0)
+	check(reaction_nodes("CurseSpread").size() == 3, "Killing an already-secondary carrier adds no second-generation curse transfer visual")
+	await physics_wait(0.85)
+	check(reaction_nodes("CurseSpread").is_empty(), "All curse seeds, threads and world-space particle tails release after their short travel")
+
+	await prepare(false)
+	scene.storm.set_physics_process(false)
+	scene.progression.skills.meteor = 1
+	scene.player.stats.magic_attack = 100.0
+	scene.player.stats.range_multiplier = 2.0
+	target = enemy_at(Vector3(0, 0.04, -4), 10000.0)
+	accepted = enemy_at(Vector3(2.8, 0.04, -4), 10000.0)
+	dodger = enemy_at(Vector3(-1, 0.04, -4), 10000.0)
+	dodger.stats.dodge_chance = 1.0
+	var outside := enemy_at(Vector3(3.2, 0.04, -4), 10000.0)
+	target.apply_status("freeze", scene.player, "huntian_ling")
+	scene.player.deal_fabao_damage(target, "meteor")
+	var shatters := reaction_nodes("IceShatter")
+	var contacts := reaction_nodes("IceContact")
+	check(shatters.size() == 1 and contacts.size() == 2 and accepted.health == 9965.0 and outside.health == 10000.0 and dodger.health == 10000.0, "Breaking ice shows one rupture and contact frost only on accepted damage inside the unchanged three-metre reaction radius")
+	if not shatters.is_empty():
+		var root := shatters[0]
+		var boundary := root.get_node("IceBoundary") as MeshInstance3D
+		check(is_equal_approx((boundary.mesh as QuadMesh).size.x * 0.5 * 0.972, 3.0) and boundary.global_position.is_equal_approx(Vector3(target.position.x, 0.11, target.position.z)) and fx_particle_slots(root) == 40, "The shared ring shader displays the real fixed three-metre shatter edge, independent of the player's doubled range stat")
+		var root_id := root.get_instance_id()
+		await physics_wait(0.06)
+		var progress: float = boundary.material_override.get_shader_parameter("progress")
+		scene.toggle_pause()
+		await physics_wait(0.18)
+		check(boundary.material_override.get_shader_parameter("progress") == progress, "The shatter boundary's native material tween pauses with combat")
+		scene.toggle_pause()
+		await physics_wait(0.86)
+		check(not is_instance_id_valid(root_id) and reaction_nodes().is_empty(), "Shatter geometry, boundary and accepted-contact layers finish and release completely")
+	for index in scene.feedback.MAX_REACTION_EFFECTS + 8:
+		scene.feedback.shock_chain(Vector3.ZERO, Vector3(1, 1, 0))
+	var roots := reaction_nodes()
+	var slots := 0
+	for root in roots:
+		slots += fx_particle_slots(root)
+	check(roots.size() == scene.feedback.MAX_REACTION_EFFECTS and slots <= scene.feedback.MAX_REACTION_EFFECTS * 40, "A burst of reaction requests respects the authored thirty-two-root and forty-slot per-root particle budget instead of growing without bound")
+	await physics_wait(0.70)
+	check(reaction_nodes().is_empty(), "The saturated reaction batch still cleans up every temporary root")
+	reaction_fx_checks_completed = true
+
+func check_artifact_presentation() -> void:
+	await prepare(false)
+	var burning := enemy_at(Vector3(0, 0.04, -3), 1.0)
+	var next := enemy_at(Vector3(1.5, 0.04, -4), 10000.0)
+	var last := enemy_at(Vector3(-1.5, 0.04, -4), 10000.0)
+	burning.apply_status("burn", scene.player, "meteor", 4.0)
+	var fire_contacts: Array[int] = [0]
+	var record_fire: Callable = func(node: Node) -> void:
+		if node.get_meta("reaction_fx", false) and String(node.name).begins_with("RibbonFireContact"):
+			fire_contacts[0] += 1
+	scene.feedback.child_entered_tree.connect(record_fire)
+	scene.progression.skills.huntian_ling = 1
+	var lit: bool = await until(func() -> bool: return not scene.storm.ribbon.is_empty() and scene.storm.ribbon.visual.carrying_fire, 1.2)
+	check(lit, "A real sash hit picks up its victim's primary burn and starts the carried-fire presentation")
+	if lit:
+		scene.storm.ribbon_cooldown = 100.0
+		var flight: Dictionary = scene.storm.ribbon
+		var visual: Node3D = flight.visual
+		var visual_id := visual.get_instance_id()
+		var model_id: int = visual.model.get_instance_id()
+		var fire_ids: Array[int] = []
+		var follows: bool = visual.fire_emitters.size() == 2 and visual.emitters.size() == 4 and visual.meshes.size() == 1
+		var fire_slots := 0
+		for emitter: GPUParticles3D in visual.fire_emitters:
+			fire_ids.append(emitter.get_instance_id())
+			fire_slots += emitter.amount
+			follows = follows and emitter.get_parent() == visual and not emitter.local_coords and emitter.emitting and emitter.global_position.is_equal_approx(flight.follow.global_position)
+		check(follows and fire_slots == 20 and visual.seam_material.get_shader_parameter("tint").is_equal_approx(Color("ff6834")), "Carried fire adds only two twenty-slot world-space wakes to the real sash head and warms the original skinned seam")
+		var point: Vector3 = flight.follow.global_position
+		var history_count: int = visual.history.size()
+		await physics_wait(0.08)
+		check(visual.model.get_instance_id() == model_id and visual.meshes.size() == 1 and visual.spine_bones.size() == 65 and visual.history.size() > history_count and flight.follow.global_position.distance_to(point) > 0.05, "The fiery sash keeps one original cloth and follows the genuine travelled Curve3D rather than cloning a second fire ribbon")
+		point = flight.follow.global_position
+		var age: float = visual.age
+		scene.toggle_pause()
+		await physics_wait(0.15)
+		check(visual.age == age and flight.follow.global_position.is_equal_approx(point) and visual.carrying_fire, "Pause retains the fiery sash's exact head and local shader time on the same real path")
+		scene.toggle_pause()
+		check(await until(func() -> bool: return scene.storm.ribbon_hits == 3, 3.0) and next.has_status("burn") and last.has_status("burn") and fire_contacts[0] == 2, "Only the two accepted burn transfers emit fire-contact effects; picking up the initial flame is not a false transfer")
+		flight.burn_snapshot.remaining = 0.0
+		await physics_wait(0.04)
+		var stopped: bool = not visual.carrying_fire
+		for index in visual.fire_emitters.size():
+			stopped = stopped and not visual.fire_emitters[index].emitting and visual.fire_emitters[index].get_instance_id() == fire_ids[index]
+		check(stopped and visual.seam_material.get_shader_parameter("tint").is_equal_approx(Color("f5a14a")), "Ending the executor-owned burn snapshot stops the same two emitters and restores the original seam without a parallel fire timer")
+		check(await until(func() -> bool: return scene.storm.ribbon.is_empty(), 1.8), "The carried-fire sash returns and dissolves through its existing path lifecycle")
+		await physics_wait(0.04)
+		check(not is_instance_id_valid(visual_id) and reaction_nodes("RibbonFireContact").is_empty(), "Releasing the sash also releases its fire emitters and every owner-bound transfer accent")
+		scene.storm.ribbon_cooldown = 0.0
+		var prior_hits: int = scene.storm.ribbon_hits
+		check(await until(func() -> bool: return scene.storm.ribbon_hits > prior_hits, 1.3) and not scene.storm.ribbon.visual.carrying_fire and scene.storm.ribbon.visual.fire_emitters.is_empty() and fire_contacts[0] == 2, "A later sash contacting only secondary burns neither rekindles the carried-fire effect nor shows another propagation")
+	scene.feedback.child_entered_tree.disconnect(record_fire)
+
+	await prepare(false)
+	scene.progression.skills.swords = 5
+	scene.progression.skills.huntian_ling = 3
+	scene.progression.evolutions.swords_pierce = 1
+	scene.storm.ribbon_cooldown = 100.0
+	scene.storm.refresh_skills()
+	var blade_ids_before := blade_ids()
+	var dormant: bool = scene.storm.blades.size() == 7
+	for blade: Node3D in scene.storm.blades:
+		dormant = dormant and not blade.piercing and blade.flight_emitters.size() == 2
+		var slots := 0
+		for emitter: GPUParticles3D in blade.flight_emitters:
+			slots += emitter.amount
+			dormant = dormant and not emitter.emitting and not emitter.local_coords
+		dormant = dormant and slots == 16
+	check(dormant and reaction_nodes("SwordPierce").is_empty(), "Seven idle source-asset swords own bounded two-layer flight emitters without emitting a persistent evolved attack")
+	var bound := enemy_at(Vector3(0, 0.04, -4), 10000.0)
+	bound.apply_status("bind", scene.player, "huntian_ling", 8.0)
+	var pierced: bool = await until(func() -> bool: return scene.storm.evolved_strikes > 0, 0.6)
+	check(pierced and not reaction_nodes("SwordPierce").is_empty(), "Entering an actual evolved attack leg creates its short gold-and-cyan piercing cue")
+	if pierced:
+		var flight: Dictionary = scene.storm.flights[0]
+		var blade: Node3D = flight.blade
+		var emitter_ids: Array[int] = []
+		var emitting := true
+		for emitter: GPUParticles3D in blade.flight_emitters:
+			emitter_ids.append(emitter.get_instance_id())
+			emitting = emitting and emitter.emitting
+		check(blade.piercing and emitting and blade.wake.material_override.get_shader_parameter("tint").is_equal_approx(Color("bd8238")), "Only the committed piercing strike switches the original sword wake and its two existing flight emitters to evolved colors")
+		var clock: float = blade.clock
+		var point: Vector3 = blade.global_position
+		scene.toggle_pause()
+		await physics_wait(0.15)
+		check(blade.clock == clock and blade.global_position.is_equal_approx(point) and blade.piercing, "The evolved sword's local visual clock and real flight freeze together under pause")
+		scene.toggle_pause()
+		bound.remove_status("bind")
+		check(await until(func() -> bool: return not blade.piercing, 1.2), "The next ordinary attack leg clears the evolved color state after the bound victim is released")
+		var reused := true
+		for index in blade.flight_emitters.size():
+			reused = reused and blade.flight_emitters[index].get_instance_id() == emitter_ids[index]
+		check(reused and blade.wake.material_override.get_shader_parameter("tint").is_equal_approx(Color(0.015, 0.19, 0.9)), "Evolution and ordinary routing reuse the exact same sword particle instances and restore the original trail color")
+	bound.position = Vector3(0, 0.04, -12)
+	check(await until(func() -> bool: return scene.storm.active_swords == 0, 3.0), "Losing the evolved target returns the original swords through their native paths")
+	await physics_wait(0.55)
+	dormant = blade_ids() == blade_ids_before and reaction_nodes("SwordPierce").is_empty()
+	for blade: Node3D in scene.storm.blades:
+		dormant = dormant and not blade.piercing
+		for emitter: GPUParticles3D in blade.flight_emitters:
+			dormant = dormant and not emitter.emitting
+	check(dormant, "Returned idle swords retain no piercing boost, attack accent or still-emitting flight layer")
+
+	await prepare(false)
+	scene.storm.set_physics_process(false)
+	var target := enemy_at(Vector3(0, 0.04, -4), 10000.0)
+	check(not scene.storm.request_fate_cast(target) and reaction_nodes("FateSeal").is_empty(), "A locked seal rejects the fate request without displaying an invocation")
+	scene.progression.skills.meteor = 1
+	scene.storm.meteor_cooldown = 100.0
+	target.hide()
+	check(not scene.storm.request_fate_cast(target) and reaction_nodes("FateSeal").is_empty(), "An invalid hidden target also produces no false fate invocation")
+	target.show()
+	check(scene.storm.request_fate_cast(target) and reaction_nodes("FateSeal").size() == 1, "The accepted secondary seal receives one distinct invocation accent")
+	var stamps := reaction_nodes("FateSeal")
+	if not stamps.is_empty():
+		check(fx_particle_slots(stamps[0]) == 20 and stamps[0].find_children("*", "GPUParticles3D", true, false).size() == 2, "The fate invocation remains a short two-layer twenty-slot effect attached to the existing seal lifecycle")
+	check(scene.storm.request_fate_cast(target) and not scene.storm.request_fate_cast(target) and reaction_nodes("FateSeal").size() == 2 and scene.storm.meteor_cooldown == 100.0, "The shared two-seal capacity accepts exactly two accents and a rejected third request creates none")
+	var stamp_ids: Array[int] = []
+	for root in reaction_nodes("FateSeal"):
+		stamp_ids.append(root.get_instance_id())
+	scene.storm.reset()
+	await physics_wait(0.04)
+	var cleared := reaction_nodes("FateSeal").is_empty()
+	for instance_id in stamp_ids:
+		cleared = cleared and not is_instance_id_valid(instance_id)
+	check(cleared, "Cancelling in-flight seals frees their owner-bound invocation roots without waiting for a delayed impact")
+	artifact_fx_checks_completed = true
 
 func check_incoming_damage() -> void:
 	await prepare(false)
@@ -1847,9 +2233,13 @@ func check_waves_and_endings() -> void:
 	check(bosses == 1 and scene.boss.get_instance_id() == boss_id and scene.director._spawn_timer.is_stopped(), "The final boss is not duplicated and ordinary spawning stops")
 	var kills: int = scene.defeat_count
 	var boss_health: float = scene.boss.health
+	var status_survivor := enemy_at(Vector3(10, 0.04, -6), 10000.0)
+	status_survivor.apply_status("burn", scene.player, "meteor")
+	scene.feedback.shock_chain(scene.boss.global_position, status_survivor.global_position)
 	var result: Dictionary = scene.player.deal_damage(scene.boss, DamageRules.Kind.FIXED, 100000.0, 0)
 	check(result.lethal and result.actual == boss_health and scene.defeat_count == kills + 1 and scene.state == "won", "An actual boss kill enters victory exactly once with clamped actual damage")
 	check(get_tree().paused and scene.hud.result_panel.visible and not scene.player.enabled, "Victory freezes combat and displays the result panel")
+	check(status_survivor._status_visuals.is_empty() and reaction_nodes().is_empty(), "Victory removes surviving enemies' status effects and active reaction roots before pausing the result screen")
 	scene.boss.receive_damage({"damage": 10000, "dodged": false}, Vector3.ZERO)
 	scene._finish(false)
 	check(scene.state == "won" and scene.defeat_count == kills + 1, "A repeated boss hit or late loss cannot replace the completed victory")
@@ -1857,11 +2247,73 @@ func check_waves_and_endings() -> void:
 	await prepare(false)
 	var attacker := BattleStats.new()
 	attacker.independent_attack = 100000.0
+	status_survivor = enemy_at(Vector3(0, 0.04, -4), 10000.0)
+	status_survivor.apply_status("curse", scene.player, "thunder_orb")
+	scene.feedback.shock_chain(scene.player.global_position, status_survivor.global_position)
 	scene.player.receive_damage(DamageRules.calculate(attacker, scene.player.stats, 2, 1.0, 0, 1.0, 1.0), Vector3.ZERO)
 	check(scene.state == "lost" and scene.player.dead and scene.player.health == 0.0 and get_tree().paused and scene.hud.result_panel.visible, "Real lethal damage ends the run without a target-dummy respawn")
+	check(status_survivor._status_visuals.is_empty() and reaction_nodes().is_empty(), "Defeat also clears status and reaction presentation immediately rather than freezing orphan effects forever")
 	await capture("end-lost")
 	scene.restart()
 	check(scene.state == "playing" and not scene.player.dead and scene.player.health == 120.0 and not scene.hud.result_panel.visible, "The same scene can restart cleanly after defeat")
+
+func check_combat_demo() -> void:
+	scene.director.combat_demo = true
+	# Exercise a restart before the result screen's deferred attack cleanup runs.
+	scene._finish(false)
+	scene.restart()
+	var all_unlocked: bool = scene.progression.skills.size() == 5
+	for definition: SkillDefinition in scene.progression.skill_definitions:
+		all_unlocked = all_unlocked and scene.progression.skill_level(definition.id) == definition.max_level
+	check(all_unlocked and scene.progression.has_fate("crit_seal") and scene.progression.has_evolution("swords_pierce"), "Combat demo grants all five actual artifacts at maximum rank plus the existing fate and evolution")
+	check(scene.player.health == 100000.0 and scene.player.auto_attack and scene.player.combo_total == 3 and is_equal_approx(scene.player._attack_reach(), 2.25), "Combat demo grants durable player health without replacing Nezha's passive or ordinary melee")
+	await physics_wait(0.35)
+	check(scene.aura._level == 5 and is_instance_valid(scene.aura._visual) and scene.storm.blades.size() == 7, "Deferred cleanup from a finished run cannot clear the freshly restarted full-artifact loadout")
+	check(scene.director._pending.size() == 40 and scene.director.get_alive_count() == 0, "Combat demo queues exactly forty enemies through the original native warning timers")
+	var elapsed_before: float = scene.director.elapsed
+	var timer_before: float = scene.director._spawn_timer.time_left
+	scene.toggle_pause()
+	await physics_wait(0.2)
+	check(scene.director.elapsed == elapsed_before and scene.director._spawn_timer.time_left == timer_before and scene.director._pending.size() == 40 and scene.director.get_alive_count() == 0, "Pausing the demo freezes both replenishment and all forty pending warnings")
+	scene.toggle_pause()
+	check(await until(func() -> bool: return scene.director.get_alive_count() == 40, 1.1), "The demo starts with exactly forty live AI enemies after their warnings")
+	var durable: bool = scene.director.get_alive_count() == 40
+	for enemy: ArenaEnemy in scene.director._alive:
+		durable = durable and enemy.stats.max_health == 20000.0 and enemy.experience_value == 0 and enemy.is_physics_processing() and not enemy.boss and not enemy.elite
+	check(durable, "Every demo enemy uses the original AI with twenty thousand health and no experience drops")
+	check(await until(func() -> bool: return scene.director.get_alive_count() == 44, 2.2), "The existing wave timer adds another four enemies after two seconds")
+	for i in 12:
+		scene.director._spawn_tick()
+	check(scene.director.get_alive_count() + scene.director._pending.size() == 80, "Repeated demo spawn ticks reserve at most the existing eighty-enemy crowd budget")
+	check(await until(func() -> bool: return scene.director.get_alive_count() == 80, 1.1), "Pending demo enemies enter without exceeding the eighty-enemy cap")
+	var all_hit := await until(func() -> bool: return scene.storm.sword_hits > 0 and scene.storm.meteor_hits > 0 and scene.storm.ribbon_hits > 0 and scene.orbs.hit_count > 0 and scene.aura.hit_count > 0, 12.0)
+	check(all_hit, "All five demo artifacts automatically deal actual damage against the moving crowd (swords=%d seal=%d sash=%d orbs=%d aura=%d)" % [scene.storm.sword_hits, scene.storm.meteor_hits, scene.storm.ribbon_hits, scene.orbs.hit_count, scene.aura.hit_count])
+	if not scene.director._alive.is_empty():
+		var target: ArenaEnemy = scene.director._alive[0]
+		target.receive_damage({"damage": 100000.0, "dodged": false}, Vector3.ZERO)
+		await physics_wait(0.05)
+		check(scene.defeat_count == 1 and scene.drops.get_child_count() == 0 and scene.progression.pending_levels == 0 and scene.state == "playing", "A real demo kill produces no XP or blocking upgrade choice")
+		check(await until(func() -> bool: return scene.director.get_alive_count() == 80, 3.0), "The running wave timer replenishes a killed high-health enemy back to the existing cap")
+	scene.director.elapsed = scene.director.duration + 1.0
+	await physics_wait(0.1)
+	check(not scene.director._boss_scheduled and not is_instance_valid(scene.boss) and not scene.director._spawn_timer.is_stopped() and scene.state == "playing", "Demo replenishment continues beyond ten minutes without scheduling a final boss")
+	var previous_enemy_ids: Array[int] = []
+	for enemy: ArenaEnemy in scene.director._alive:
+		previous_enemy_ids.append(enemy.get_instance_id())
+	scene.toggle_pause()
+	scene.restart()
+	await physics_wait(0.05)
+	var old_enemies_freed := true
+	for id: int in previous_enemy_ids:
+		old_enemies_freed = old_enemies_freed and not is_instance_id_valid(id)
+	check(old_enemies_freed and scene.state == "playing" and not get_tree().paused and scene.progression.skill_level("huntian_ling") == 5 and scene.player.health == 100000.0, "Restart from pause frees the old demo crowd and restores the full loadout and health")
+	check(await until(func() -> bool: return scene.director.get_alive_count() == 40, 1.2), "Restarting the demo starts exactly forty fresh enemies, not a duplicated eighty-enemy wave")
+	scene.director.combat_demo = false
+	scene.restart()
+	check(scene.player.stats.max_health == 120.0 and scene.progression.skill_level("swords") == 1 and scene.progression.skill_level("huntian_ling") == 0 and scene.progression.fates.is_empty() and scene.progression.evolutions.is_empty(), "Leaving the demo restores unchanged normal Resource values and starting ownership")
+	await physics_wait(0.35)
+	check(scene.director._pending.size() == 3, "Ordinary play still starts with its authored three-enemy wave")
+	combat_demo_checks_completed = true
 
 func check_short_load() -> void:
 	await prepare(true)
@@ -1917,6 +2369,13 @@ func check_short_load() -> void:
 		"ribbon_hits": scene.storm.ribbon_hits,
 		"evolved_strikes": scene.storm.evolved_strikes,
 		"reaction_count": scene.player.reaction_count,
+		"max_status_fx_roots": max_status_fx_roots,
+		"max_status_fx_particle_slots": max_status_fx_particle_slots,
+		"max_reaction_fx_roots": max_reaction_fx_roots,
+		"max_reaction_fx_particle_slots": max_reaction_fx_particle_slots,
+		"status_fx_particle_slots_per_state": 16,
+		"reaction_fx_root_limit": scene.feedback.MAX_REACTION_EFFECTS,
+		"reaction_fx_particle_slots_per_root_limit": 40,
 		"max_ribbon_particle_slots": max_ribbon_particle_slots,
 		"max_ribbon_spine_bones": max_ribbon_spine_bones,
 		"max_ribbon_history_points": max_ribbon_history_points,
@@ -1925,7 +2384,9 @@ func check_short_load() -> void:
 	check(max_active_swords <= 7 and max_active_meteors <= 2 and max_active_orbs <= 9, "Crowd-load auxiliary concurrency stays within seven swords, two seals and nine orbs")
 	check(scene.storm.evolved_strikes > 0 and scene.player.reaction_count > 0 and max_active_swords <= 7 and max_active_meteors <= 2 and max_active_orbs <= 9, "The full-system crowd fixture executes actual evolution and elemental reactions within the divinity-adjusted artifact concurrency limits")
 	check(scene.aura._emitters.size() == 4 and scene.aura.pulse_count >= 8 and scene.aura.hit_count > 0, "The full-load formation keeps four emitters and continues real damage beside all existing skills")
-	check(scene.storm.ribbon_casts > 0 and scene.storm.ribbon_hits > 0 and max_ribbon_particle_slots <= 340 and max_ribbon_spine_bones == 65 and max_ribbon_history_points <= 384, "The full-load sash stays within 340 particle slots, one 65-bone skin and 384 history samples")
+	check(scene.storm.ribbon_casts > 0 and scene.storm.ribbon_hits > 0 and max_ribbon_particle_slots <= 360 and max_ribbon_spine_bones == 65 and max_ribbon_history_points <= 384, "The full-load sash stays within its original 340 particle slots plus twenty carried-fire slots, one 65-bone skin and 384 history samples")
+	check(max_status_fx_roots > 0 and max_status_fx_roots <= performance_enemies * ArenaEnemy.STATUS_RULES.size() and max_status_fx_particle_slots <= performance_enemies * ArenaEnemy.STATUS_RULES.size() * 16, "Crowd status presentation stays within eight receiver-owned roots and sixteen slots per state without accumulating refreshed copies")
+	check(max_reaction_fx_roots > 0 and max_reaction_fx_roots <= scene.feedback.MAX_REACTION_EFFECTS and max_reaction_fx_particle_slots <= scene.feedback.MAX_REACTION_EFFECTS * 40, "Actual full-system reactions stay within thirty-two live roots and the authored forty-slot per-root ceiling")
 	await capture("crowd-%d" % performance_enemies)
 
 func summarize(values: Array[float]) -> Dictionary:
@@ -1962,6 +2423,8 @@ func finish_report() -> void:
 		paths = ["res://artifacts/huntian-demo-%s.json" % mode]
 	elif "--huntian-only" in OS.get_cmdline_user_args():
 		paths = ["res://artifacts/huntian-verification-%s.json" % mode]
+	elif "--combat-demo" in OS.get_cmdline_user_args():
+		paths = ["res://artifacts/combat-demo-%s.json" % mode]
 	for path: String in paths:
 		var output := FileAccess.open(path, FileAccess.WRITE)
 		if output != null:

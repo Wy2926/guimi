@@ -2,6 +2,7 @@ extends Node3D
 ## Godot particles, mesh/material tweens and positional audio; no third-party runtime.
 
 const SWORD_IMPACT := preload("res://assets/weapons/astral_edge/impact.tscn")
+const MAX_REACTION_EFFECTS := 32
 
 const SOUNDS := {
 	"swish": preload("res://assets/audio/knifeSlice.ogg"),
@@ -19,6 +20,7 @@ const SOUNDS := {
 
 var random := RandomNumberGenerator.new()
 var _last_storm_sound := -1000
+var _reaction_roots: Array[Node3D] = []
 
 func sound(key: String, pos: Vector3, volume := -5.0, pitch := 1.0) -> void:
 	if DisplayServer.get_name() == "headless":
@@ -58,6 +60,13 @@ func prewarm(fighter: DuelFighter) -> void:
 	add_child(seal)
 	seal.shatter()
 	seal_impact(Vector3.ZERO, 1.0, seal)
+	shock_chain(Vector3(-1, 0.8, 0), Vector3(1, 0.8, 0))
+	curse_spread(Vector3(1, 0.8, 0), Vector3(-1, 0.8, 0))
+	ice_shatter(Vector3.ZERO)
+	ice_contact(Vector3(0, 0.8, 0))
+	ribbon_fire_contact(Vector3(0, 0.8, 0), Vector3.FORWARD, fighter)
+	sword_pierce(Vector3(0, 1.2, 0), Vector3.FORWARD, fighter)
+	fate_seal(Vector3(0, 0.2, 0), fighter)
 	await get_tree().create_timer(1.1, false).timeout
 	AudioServer.set_bus_mute(1, was_muted)
 
@@ -268,6 +277,261 @@ func ribbon_impact(pos: Vector3, direction: Vector3, owner_node: Node3D) -> void
 	sound("cloth", pos, -11.0, 1.45)
 	sound("swish", pos, -13.0, 1.25)
 	sound("impact", pos, -15.0, 1.2)
+
+func shock_chain(origin: Vector3, destination: Vector3) -> void:
+	var root := _reaction_root("ShockChain", origin, 0.55)
+	if root == null:
+		return
+	var toward := destination - origin
+	var side := toward.normalized().cross(Vector3.UP).normalized()
+	var points := PackedVector3Array()
+	for i in 9:
+		var fraction := float(i) / 8.0
+		# Both endpoints stay on the actual receivers; only the middle branches.
+		var offset := sin(fraction * PI) * (0.12 if i % 2 == 0 else -0.12)
+		points.append(origin.lerp(destination, fraction) + side * offset)
+	_reaction_line(root, "ShockMistPath", points, 0.14, Color("59ddcc"), 0.22, true)
+	_reaction_line(root, "ShockCore", points, 0.018, Color("fff0bb"), 0.19)
+	var sparks := _burst(destination, toward, 12, Color("f6d395"), 0.24, 3.5, 0.031)
+	sparks.name = "ShockContactSparks"
+	(sparks.process_material as ParticleProcessMaterial).spread = 42.0
+	var motes := _burst(destination, Vector3.UP, 8, Color("59ddcc"), 0.38, 0.9, 0.028)
+	motes.name = "ShockRisingMotes"
+	(motes.process_material as ParticleProcessMaterial).gravity = Vector3(0, 0.6, 0)
+	for effect in [sparks, motes]:
+		effect.reparent(root)
+
+func curse_spread(origin: Vector3, destination: Vector3) -> void:
+	var root := _reaction_root("CurseSpread", origin, 0.72)
+	if root == null:
+		return
+	var points := PackedVector3Array()
+	var curve := Curve3D.new()
+	for i in 9:
+		var fraction := float(i) / 8.0
+		var point := origin.lerp(destination, fraction) + Vector3.UP * sin(fraction * PI) * 0.35
+		points.append(point)
+		curve.add_point(point - origin)
+	_reaction_line(root, "CurseThread", points, 0.065, Color("8835e5"), 0.46, true)
+	var seed := MeshInstance3D.new()
+	seed.name = "CurseSeed"
+	var mesh := SphereMesh.new()
+	mesh.radius = 0.045
+	mesh.height = 0.09
+	mesh.radial_segments = 8
+	mesh.rings = 4
+	seed.mesh = mesh
+	seed.material_override = _emissive(Color("ca8dff"), 1.35)
+	seed.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	root.add_child(seed)
+	var sparks := attach_trail(seed, Color("ca8dff"), 12, 0.24)
+	sparks.name = "CurseSparks"
+	var mist := attach_trail(seed, Color("8835e5"), 8, 0.36)
+	mist.name = "CurseMist"
+	_soften_particles(mist, Vector2(0.17, 0.12), 0.19)
+	var travel := root.create_tween()
+	travel.tween_method(func(distance: float) -> void: seed.position = curve.sample_baked(distance), 0.0, curve.get_baked_length(), 0.28).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
+	travel.tween_callback(func() -> void:
+		sparks.emitting = false
+		mist.emitting = false)
+	travel.tween_property(seed, "transparency", 1.0, 0.12)
+
+func ice_shatter(origin: Vector3, radius: float = 3.0) -> void:
+	var root := _reaction_root("IceShatter", origin, 0.80)
+	if root == null:
+		return
+	# Match the actual fixed reaction radius, not the player's range multiplier.
+	var boundary := _astral_ring(Vector3(origin.x, 0.11, origin.z), radius * 2.0 / 0.972, 0.58, false, Color("6abbd7"), Color("e1faff"))
+	boundary.name = "IceBoundary"
+	boundary.reparent(root)
+	var shards := _burst(origin + Vector3.UP * 0.7, Vector3.UP, 28, Color("a4e7f5"), 0.62, 5.0, 0.045)
+	shards.name = "IceFacets"
+	var process := shards.process_material as ParticleProcessMaterial
+	process.spread = 82.0
+	process.gravity = Vector3(0, -4.0, 0)
+	process.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_RING
+	process.emission_ring_axis = Vector3.UP
+	process.emission_ring_radius = 0.38
+	process.emission_ring_inner_radius = 0.12
+	process.emission_ring_height = 0.15
+	var facet := PrismMesh.new()
+	facet.size = Vector3(0.065, 0.20, 0.027)
+	facet.material = shards.draw_pass_1.material
+	(facet.material as StandardMaterial3D).emission_energy_multiplier = 0.7
+	shards.draw_pass_1 = facet
+	var frost := _burst(origin + Vector3.UP * 0.35, Vector3.UP, 12, Color("95d6e8"), 0.50, 2.5, 0.048)
+	frost.name = "IceFrostCloud"
+	(frost.process_material as ParticleProcessMaterial).gravity = Vector3(0, 0.2, 0)
+	_soften_particles(frost, Vector2(0.25, 0.18), 0.25)
+	for effect in [shards, frost]:
+		effect.reparent(root)
+
+func ice_contact(pos: Vector3) -> void:
+	var root := _reaction_root("IceContact", pos, 0.48)
+	if root == null:
+		return
+	var sparks := _burst(pos, Vector3.UP, 10, Color("d6faff"), 0.27, 2.4, 0.030)
+	sparks.name = "IceContactFlakes"
+	var frost := _burst(pos, Vector3.UP, 6, Color("66bddf"), 0.36, 0.7, 0.035)
+	frost.name = "IceContactMist"
+	(frost.process_material as ParticleProcessMaterial).gravity = Vector3(0, 0.35, 0)
+	_soften_particles(frost, Vector2(0.14, 0.11), 0.2)
+	var ring := ground_ring(pos, Color("a4e7f5"), 0.26, 1.15)
+	for effect in [sparks, frost, ring]:
+		effect.reparent(root)
+
+func ribbon_fire_contact(pos: Vector3, direction: Vector3, owner_node: Node3D) -> void:
+	var root := _reaction_root("RibbonFireContact", pos, 0.70, owner_node)
+	if root == null:
+		return
+	var forward := direction.normalized() if not direction.is_zero_approx() else Vector3.FORWARD
+	var points := PackedVector3Array([pos - forward * 0.35, pos, pos + forward * 0.7 + Vector3.UP * 0.18])
+	_reaction_line(root, "FireSilkWake", points, 0.22, Color("e96b35"), 0.36, true)
+	_reaction_line(root, "FireSilkCore", points, 0.018, Color("ffd499"), 0.20)
+	var sparks := _burst(pos, forward, 14, Color("ffd499"), 0.35, 3.6, 0.037)
+	sparks.name = "FireContactSparks"
+	(sparks.process_material as ParticleProcessMaterial).spread = 24.0
+	var embers := _burst(pos, forward * 0.4 + Vector3.UP, 10, Color("ee6b39"), 0.50, 1.2, 0.043)
+	embers.name = "FireSilkEmbers"
+	(embers.process_material as ParticleProcessMaterial).gravity = Vector3(0, 0.55, 0)
+	_soften_particles(embers, Vector2(0.12, 0.23), 0.32)
+	for effect in [sparks, embers]:
+		effect.reparent(root)
+
+func sword_pierce(pos: Vector3, direction: Vector3, owner_node: Node3D) -> void:
+	var root := _reaction_root("SwordPierce", pos, 0.48, owner_node)
+	if root == null:
+		return
+	var forward := direction.normalized() if not direction.is_zero_approx() else Vector3.FORWARD
+	var side := forward.cross(Vector3.UP).normalized()
+	var path := PackedVector3Array([pos - forward * 0.35, pos, pos + forward * 1.45])
+	_reaction_line(root, "PierceGoldWake", path, 0.16, Color("e4b76d"), 0.27, true)
+	var point := pos + forward * 0.55
+	_reaction_line(root, "PiercePoint", PackedVector3Array([pos - side * 0.24, point, pos + side * 0.24]), 0.020, Color("fff0c4"), 0.21)
+	var sparks := _burst(pos, forward, 12, Color("f6d395"), 0.25, 4.8, 0.032)
+	sparks.name = "PierceForwardSparks"
+	(sparks.process_material as ParticleProcessMaterial).spread = 9.0
+	(sparks.process_material as ParticleProcessMaterial).gravity = Vector3.ZERO
+	var wake := _burst(pos, -forward, 8, Color("78dce7"), 0.34, 1.2, 0.022)
+	wake.name = "PierceCounterMotes"
+	(wake.process_material as ParticleProcessMaterial).spread = 16.0
+	(wake.process_material as ParticleProcessMaterial).gravity = Vector3.ZERO
+	for effect in [sparks, wake]:
+		effect.reparent(root)
+
+func fate_seal(pos: Vector3, owner_node: Node3D) -> void:
+	var root := _reaction_root("FateSeal", pos, 0.62, owner_node)
+	if root == null:
+		return
+	# A small suspended seal, distinct from the full-size ground damage warning.
+	var center := pos + Vector3.UP * 0.38
+	var corners := PackedVector3Array()
+	for i in 5:
+		var angle := float(i) * PI / 2.0 + PI / 4.0
+		corners.append(center + Vector3(cos(angle), 0, sin(angle)) * 0.44)
+	_reaction_line(root, "FateSealOutline", corners, 0.025, Color("f6d395"), 0.43)
+	_reaction_line(root, "FateSealInner", PackedVector3Array([center - Vector3.RIGHT * 0.21, center, center + Vector3.FORWARD * 0.21]), 0.08, Color("ef702e"), 0.40, true)
+	var sparks := _burst(center, Vector3.UP, 12, Color("ffe1a1"), 0.32, 1.5, 0.033)
+	sparks.name = "FateGoldSparks"
+	(sparks.process_material as ParticleProcessMaterial).spread = 18.0
+	(sparks.process_material as ParticleProcessMaterial).gravity = Vector3(0, 0.3, 0)
+	var embers := _burst(center, Vector3.UP, 8, Color("e97636"), 0.48, 0.7, 0.031)
+	embers.name = "FateFireMotes"
+	(embers.process_material as ParticleProcessMaterial).gravity = Vector3(0, 0.6, 0)
+	for effect in [sparks, embers]:
+		effect.reparent(root)
+
+func clear_reactions() -> void:
+	# Result screens pause the world immediately, so do not await fading tweens.
+	for root: Node3D in _reaction_roots:
+		if is_instance_valid(root):
+			root.hide()
+			root.queue_free()
+	_reaction_roots.clear()
+
+func _reaction_root(label: String, pos: Vector3, lifetime: float, owner_node: Node3D = null) -> Node3D:
+	# A bounded addition to this existing feedback owner, not a second effect manager.
+	# Skipping decoration at saturation never changes damage, statuses or proc counts.
+	if not is_inside_tree() or get_tree().paused:
+		return null
+	for i in range(_reaction_roots.size() - 1, -1, -1):
+		if not is_instance_valid(_reaction_roots[i]):
+			_reaction_roots.remove_at(i)
+	if _reaction_roots.size() >= MAX_REACTION_EFFECTS:
+		return null
+	var root := Node3D.new()
+	root.name = label
+	root.set_meta("reaction_fx", true)
+	# The arena itself processes pause UI; feedback must follow the paused world.
+	root.process_mode = Node.PROCESS_MODE_PAUSABLE
+	add_child(root, true)
+	root.global_position = pos
+	_reaction_roots.append(root)
+	if is_instance_valid(owner_node) and owner_node != self:
+		owner_node.tree_exiting.connect(root.queue_free, CONNECT_ONE_SHOT)
+	var cleanup := root.create_tween()
+	cleanup.tween_interval(lifetime)
+	cleanup.tween_callback(root.queue_free)
+	return root
+
+func _reaction_line(root: Node3D, label: String, points: PackedVector3Array, width: float, color: Color, lifetime: float, soft := false) -> MeshInstance3D:
+	# Native strips preserve exact world endpoints without new trail resources.
+	var instance := MeshInstance3D.new()
+	instance.name = label
+	var mesh := ImmediateMesh.new()
+	mesh.surface_begin(Mesh.PRIMITIVE_TRIANGLE_STRIP)
+	for i in points.size():
+		var direction := (points[mini(i + 1, points.size() - 1)] - points[maxi(i - 1, 0)]).normalized()
+		var across := direction.cross(Vector3.UP).normalized()
+		if across.is_zero_approx():
+			across = Vector3.RIGHT
+		for edge in 2:
+			mesh.surface_set_uv(Vector2(float(i) / float(points.size() - 1), float(edge)))
+			mesh.surface_add_vertex(root.to_local(points[i] + across * width * (-1.0 if edge == 0 else 1.0)))
+	mesh.surface_end()
+	instance.mesh = mesh
+	instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	root.add_child(instance)
+	if soft:
+		var material := ShaderMaterial.new()
+		material.shader = preload("res://assets/weapons/astral_edge/trail.gdshader")
+		material.set_shader_parameter("tint", color)
+		material.set_shader_parameter("edge_color", color.lerp(Color("fff0cf"), 0.45))
+		instance.material_override = material
+		var fade := instance.create_tween()
+		fade.tween_method(func(value: float) -> void:
+			material.set_shader_parameter("visual_time", value)
+			material.set_shader_parameter("opacity", 1.0 - value / lifetime), 0.0, lifetime, lifetime)
+	else:
+		var material := _emissive(color, 1.3)
+		material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		material.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+		material.cull_mode = BaseMaterial3D.CULL_DISABLED
+		instance.material_override = material
+		instance.create_tween().tween_property(instance, "transparency", 1.0, lifetime)
+	return instance
+
+func _soften_particles(particles: GPUParticles3D, size: Vector2, opacity: float) -> void:
+	# Reuse the existing particle ramp/material; a radial quad is a thin medium,
+	# not a second hard glitter layer or a screen-covering additive cloud.
+	var quad := QuadMesh.new()
+	quad.size = size
+	var material := particles.draw_pass_1.material as StandardMaterial3D
+	material.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
+	material.emission_energy_multiplier = 0.25
+	var texture := GradientTexture2D.new()
+	texture.width = 32
+	texture.height = 32
+	texture.fill = GradientTexture2D.FILL_RADIAL
+	texture.fill_from = Vector2(0.5, 0.5)
+	texture.fill_to = Vector2(0.5, 1.0)
+	var gradient := Gradient.new()
+	gradient.set_color(0, Color(1, 1, 1, opacity))
+	gradient.set_color(1, Color(1, 1, 1, 0))
+	texture.gradient = gradient
+	material.albedo_texture = texture
+	quad.material = material
+	particles.draw_pass_1 = quad
 
 func attach_trail(parent: Node3D, color: Color, amount: int = 18, lifetime: float = 0.26) -> GPUParticles3D:
 	# Native world-space particles leave a curved wake as their parent follows Curve3D.

@@ -84,6 +84,7 @@ func refresh_skills() -> void:
 			halo.add_child(slot)
 			slots.append(slot)
 			var blade := SWORD_SCENE.instantiate() as Node3D
+			blade.feedback = feedback
 			blade.scale = Vector3.ONE * BLADE_SCALE
 			blade.phase = blades.size() * 1.8
 			slot.add_child(blade)
@@ -302,6 +303,7 @@ func _return_ribbon() -> void:
 	ribbon.path.curve = curve
 	ribbon.follow.progress = 0.0
 	ribbon.phase = "return"
+	ribbon.visual.set_carried_fire(false)
 	ribbon.visual.flow()
 	ribbon.tween = ribbon.path.create_tween().set_process_mode(Tween.TWEEN_PROCESS_PHYSICS)
 	ribbon.tween.tween_property(ribbon.follow, "progress_ratio", 1.0, 0.48).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
@@ -326,6 +328,7 @@ func _advance_ribbon(delta: float) -> void:
 		# Carry the first primary burn along this actual path, never refresh its
 		# remaining lifetime while the cloth travels or pick up a propagated burn.
 		ribbon.burn_snapshot.remaining = maxf(0.0, float(ribbon.burn_snapshot.remaining) - delta)
+	_refresh_ribbon_fire()
 	if ribbon.phase == "fade":
 		ribbon.left -= delta
 		if ribbon.left <= 0.0:
@@ -393,13 +396,21 @@ func _ribbon_contact(target: Node3D) -> void:
 			ribbon_hits += 1
 			if not ribbon.burn_snapshot.is_empty() and float(ribbon.burn_snapshot.remaining) > 0.0:
 				var source := (ribbon.burn_snapshot.source as WeakRef).get_ref() as DuelFighter
-				if is_instance_valid(source):
-					target.apply_status("burn", source, ribbon.burn_snapshot.skill_id, ribbon.burn_snapshot.remaining, ribbon.burn_snapshot.potency, true)
+				if is_instance_valid(source) and target.apply_status("burn", source, ribbon.burn_snapshot.skill_id, ribbon.burn_snapshot.remaining, ribbon.burn_snapshot.potency, true):
+					feedback.ribbon_fire_contact(point, ribbon.direction, ribbon.path)
 			elif ribbon.burn_snapshot.is_empty() and not burn.is_empty() and not bool(burn.get("secondary", false)):
 				ribbon.burn_snapshot = burn.duplicate()
+			_refresh_ribbon_fire()
 			ribbon.visual.hit()
 			feedback.ribbon_impact(point, ribbon.direction, ribbon.path)
 		break
+
+func _refresh_ribbon_fire() -> void:
+	var carries := false
+	if not ribbon.burn_snapshot.is_empty() and float(ribbon.burn_snapshot.remaining) > 0.0 and ribbon.phase in ["flight", "strike"]:
+		var source := (ribbon.burn_snapshot.source as WeakRef).get_ref() as DuelFighter
+		carries = is_instance_valid(source) and source.enabled and not source.dead
+	ribbon.visual.set_carried_fire(carries)
 
 func _fire_volley(targets: Array[Node3D]) -> void:
 	if targets.is_empty() or blades.is_empty():
@@ -528,6 +539,9 @@ func _strike_sword(flight: Dictionary, target: Node3D, start: Vector3) -> void:
 	follow.progress = 0.0
 	blade.rotation = Vector3(-PI / 2.0, 0, 0)
 	blade.set_motion(SWORD_VISUAL.Motion.FLIGHT)
+	blade.set_piercing(flight.evolved)
+	if flight.evolved:
+		feedback.sword_pierce(start, direction, flight.path)
 	flight.previous_contact = start if flight.evolved else blade.to_global(BLADE_CONTACT)
 	flight.through = direction
 	flight.phase = FlightPhase.STRIKE
@@ -657,6 +671,8 @@ func _call_meteor(target: Node3D, secondary := false) -> bool:
 	descent.tween_property(meteor, "global_position", point, METEOR_DELAY - 0.22).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN)
 	descent.parallel().tween_property(meteor, "rotation", Vector3(0, meteor.rotation.y, 0), METEOR_DELAY - 0.22)
 	meteors.append({"node": meteor, "tween": descent, "warning": warning, "position": point, "start": start, "left": METEOR_DELAY, "radius": radius, "coefficient": progression.coefficient("meteor"), "secondary": secondary})
+	if secondary:
+		feedback.fate_seal(point + Vector3.UP * 0.2, meteor)
 	return true
 
 func _advance_meteors(delta: float) -> void:

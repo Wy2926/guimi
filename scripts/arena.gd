@@ -69,6 +69,7 @@ func _ready() -> void:
 	director.enemy_container = enemies
 	director.camera = camera
 	director.arena_radius = ARENA_RADIUS
+	director.combat_demo = "--combat-demo" in OS.get_cmdline_user_args()
 	add_child(director)
 	director.enemy_spawned.connect(_on_enemy_spawned)
 	director.boss_spawned.connect(func(enemy: Node3D) -> void: boss = enemy)
@@ -92,7 +93,7 @@ func _ready() -> void:
 	camera.position = CAMERA_OFFSET
 	camera.look_at(focus)
 	_warm_start()
-	if "--verify" in OS.get_cmdline_user_args() or "--huntian-demo" in OS.get_cmdline_user_args():
+	if "--verify" in OS.get_cmdline_user_args() or "--huntian-demo" in OS.get_cmdline_user_args() or (director.combat_demo and DisplayServer.get_name() == "headless"):
 		var driver := load("res://tools/verify.gd").new() as Node
 		add_child(driver)
 
@@ -168,6 +169,8 @@ func _on_enemy_defeated(enemy: Node3D) -> void:
 	if enemy.boss:
 		_finish(true)
 		return
+	if enemy.experience_value <= 0:
+		return
 	var gem := ExperienceGem.new()
 	gem.configure(enemy.experience_value, player)
 	gem.position = enemy.global_position + Vector3.UP * 0.2
@@ -227,15 +230,27 @@ func _finish(won: bool) -> void:
 	state = "won" if won else "lost"
 	player.enabled = false
 	director.enabled = false
+	# The result screen pauses immediately, so visual lifetimes cannot finish.
+	# Release only presentation here; normal pause keeps the exact effect frame.
+	for enemy in enemies.get_children():
+		if enemy is ArenaEnemy:
+			enemy.clear_status_visuals()
+	feedback.clear_reactions()
 	storm.set_physics_process(false)
 	orbs.set_physics_process(false)
 	aura.set_physics_process(false)
 	# A lethal meteor can be inside its own iteration; release attacks afterwards.
-	storm.reset.call_deferred()
-	orbs.reset.call_deferred()
-	aura.reset.call_deferred()
+	_reset_finished_attacks.call_deferred()
 	get_tree().paused = true
 	hud.show_result(won)
+
+func _reset_finished_attacks() -> void:
+	# A restart may already have created the next run's attacks in this frame.
+	if state not in ["won", "lost"]:
+		return
+	storm.reset()
+	orbs.reset()
+	aura.reset()
 
 func restart() -> void:
 	if state == "loading":
@@ -280,6 +295,7 @@ func restart() -> void:
 	state = "playing"
 	hud.notice = "哪吒·三头八臂 · 飞剑 +1，混天绫连锁 +1"
 	hud.notice_left = 5.0
+	_configure_combat_demo()
 
 func _warm_start() -> void:
 	var veil := ColorRect.new()
@@ -299,3 +315,26 @@ func _warm_start() -> void:
 	state = "playing"
 	hud.notice = "哪吒·三头八臂 · 飞剑 +1，混天绫连锁 +1"
 	hud.notice_left = 5.0
+	_configure_combat_demo()
+
+func _configure_combat_demo() -> void:
+	if not director.combat_demo:
+		return
+	# Manual fixture only. Reuse the real progression, attacks and wave timers;
+	# Resource defaults and ordinary runs keep their authored balance.
+	for definition: SkillDefinition in progression.skill_definitions:
+		progression.skills[definition.id] = definition.max_level
+	for definition: SkillDefinition in progression.fate_definitions:
+		progression.fates[definition.id] = 1
+	for definition: SkillDefinition in progression.evolution_definitions:
+		progression.evolutions[definition.id] = 1
+	player.stats.max_health = 100000.0
+	player.health = player.stats.max_health
+	player.auto_attack = true
+	progression.changed.emit()
+	storm.refresh_skills()
+	orbs.refresh_skills()
+	aura.refresh_skills()
+	hud.notice = "全法宝满级 · 天命 / 进化已启用 · 怪物2万血 · 每2秒补4只（上限80）"
+	hud.notice_left = 12.0
+	print("COMBAT_DEMO_READY artifacts=", progression.skills, " initial_enemies=40 enemy_hp=20000 spawn_batch=4 spawn_interval=2 cap=", director.peak_cap)

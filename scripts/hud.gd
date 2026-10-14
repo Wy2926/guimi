@@ -134,7 +134,7 @@ func _refresh() -> void:
 	_experience.value = float(progression.xp)
 	_experience_text.text = "经验  %d / %d" % [int(progression.xp), int(_experience.max_value)]
 	if is_instance_valid(arena.director):
-		_time_label.text = "%s / %s" % [_clock(arena.director.elapsed), _clock(arena.director.duration)]
+		_time_label.text = ("%s · 试炼" % _clock(arena.director.elapsed)) if arena.director.combat_demo else "%s / %s" % [_clock(arena.director.elapsed), _clock(arena.director.duration)]
 		_phase.text = str(arena.director.phase_name)
 		_counts.text = "击杀 %d  ·  场上 %d" % [arena.defeat_count, arena.director.get_alive_count()]
 	_update_divinity()

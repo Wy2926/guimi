@@ -9,6 +9,9 @@ const TRAIL = preload("res://assets/weapons/astral_edge/trail.gdshader")
 @export var phase := 0.0
 @export var enable_trail := true
 var motion := Motion.IDLE
+var feedback: Node3D
+var piercing := false
+var flight_emitters: Array[GPUParticles3D] = []
 var clock := 0.0
 var power := 0.0
 var fins: Array[Node3D] = []
@@ -59,6 +62,24 @@ func _ready() -> void:
 		model.add_child(aura)
 		energy_meshes.append(aura)
 	_make_motes()
+	if is_instance_valid(feedback):
+		# Reuse the formation's native world-space trail emitter. Two sparse
+		# layers make flight readable without adding another sword or light.
+		for layer in 2:
+			var particles: GPUParticles3D = feedback.attach_trail(model, Color("78d9ff") if layer == 0 else Color("fff0c7"), 10 if layer == 0 else 6, 0.22 if layer == 0 else 0.34)
+			particles.name = "FlightFilaments" if layer == 0 else "FlightMotes"
+			particles.position.y = 2.35 if layer == 0 else 1.15
+			particles.emitting = false
+			var process := particles.process_material as ParticleProcessMaterial
+			process.direction = Vector3.DOWN
+			process.spread = 18.0 if layer == 0 else 38.0
+			process.initial_velocity_min = 0.1
+			process.initial_velocity_max = 0.65
+			process.particle_flag_align_y = true
+			var spark := particles.draw_pass_1 as SphereMesh
+			spark.radius = 0.018 if layer == 0 else 0.012
+			spark.height = 0.20 if layer == 0 else 0.035
+			flight_emitters.append(particles)
 	wake = MeshInstance3D.new()
 	wake.top_level = true
 	wake.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
@@ -71,8 +92,22 @@ func _ready() -> void:
 
 func set_motion(value: Motion) -> void:
 	motion = value
+	if value != Motion.FLIGHT:
+		set_piercing(false)
+	for particles in flight_emitters:
+		particles.emitting = is_visible_in_tree() and value == Motion.FLIGHT
 	if value == Motion.IDLE:
 		history.clear()
+
+func set_piercing(enabled: bool) -> void:
+	piercing = enabled
+	if is_instance_valid(wake):
+		wake.material_override.set_shader_parameter("tint", Color("bd8238") if enabled else Color(0.015, 0.19, 0.9))
+		wake.material_override.set_shader_parameter("edge_color", Color("fff0ba") if enabled else Color(0.5, 0.85, 1.0))
+	for particles in flight_emitters:
+		# Recolor the already-owned trail; upgrades never allocate new emitters.
+		var process := particles.process_material as ParticleProcessMaterial
+		process.color = Color("ffd591") if enabled else Color.WHITE
 
 func _process(delta: float) -> void:
 	clock += delta
@@ -88,6 +123,8 @@ func _process(delta: float) -> void:
 		item.set_instance_shader_parameter("phase", phase)
 		item.set_instance_shader_parameter("visual_time", clock)
 	ambient.emitting = is_visible_in_tree() and motion != Motion.FLIGHT
+	for particles in flight_emitters:
+		particles.emitting = is_visible_in_tree() and motion == Motion.FLIGHT
 	_update_wake(delta)
 
 func _update_wake(_delta: float) -> void:
@@ -115,7 +152,7 @@ func _update_wake(_delta: float) -> void:
 		var ratio := float(i) / float(history.size()-1)
 		var tangent := history[mini(i+1,history.size()-1)]-history[maxi(0,i-1)]
 		var side := tangent.cross(camera.global_position-history[i]).normalized()
-		var width := (0.075+power*0.12)*ratio*global_basis.get_scale().x
+		var width := (0.075+power*(0.18 if piercing else 0.12))*ratio*global_basis.get_scale().x
 		wake_mesh.surface_set_uv(Vector2(ratio,0))
 		wake_mesh.surface_add_vertex(history[i]-side*width)
 		wake_mesh.surface_set_uv(Vector2(ratio,1))

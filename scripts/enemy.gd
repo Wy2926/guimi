@@ -60,6 +60,15 @@ const DOT_INTERVAL := 0.5
 var statuses: Dictionary = {}
 var _control_recovery: Dictionary = {}
 var _status_label: Label3D
+# Visual ownership only: the authoritative status lifetime remains in statuses.
+var _status_visuals: Dictionary = {}
+var _control_immune_visual: Node3D
+const STATUS_COLORS := {
+	"burn": Color("f58a48"), "bleed": Color("dc6377"),
+	"poison": Color("83bd96"), "shock": Color("f6d395"),
+	"curse": Color("aa79d6"), "freeze": Color("9bd8eb"),
+	"bind": Color("e77b83"), "stun": Color("ead99e"),
+}
 
 func configure(kind_name: String, stage: int, element_id: int, is_elite := false, is_boss := false) -> void:
 	kind = kind_name
@@ -400,6 +409,7 @@ func receive_damage(result: Dictionary, direction: Vector3, heavy := false, spec
 		_spread_cursed_death()
 		statuses.clear()
 		_control_recovery.clear()
+		clear_status_visuals()
 		_refresh_status_label()
 		defeated.emit(self)
 	return applied
@@ -419,7 +429,10 @@ func apply_status(id: String, source: DuelFighter, skill_id: String, duration: f
 	if id in CONTROL_STATUSES:
 		# Repeated pulses cannot refresh a hard control forever. Each control
 		# has one second of recovery after expiry/consumption; bosses are immune.
-		if boss or has_status(id) or float(_control_recovery.get(id, 0.0)) > 0.0:
+		if has_status(id):
+			return false
+		if boss or float(_control_recovery.get(id, 0.0)) > 0.0:
+			_show_control_immunity(source, "boss" if boss else "recovery")
 			return false
 		lifetime *= 0.35 if elite else 1.0
 	var previous := get_status(id)
@@ -446,17 +459,23 @@ func apply_status(id: String, source: DuelFighter, skill_id: String, duration: f
 		velocity = Vector3.ZERO
 		_safe_velocity = Vector3.ZERO
 		_play("Idle")
+	_ensure_status_visual(id, source)
 	_refresh_status_label()
 	return true
 
 func remove_status(id: String) -> void:
 	if statuses.erase(id) and id in CONTROL_STATUSES:
 		_control_recovery[id] = 1.0
+	_clear_status_visual(id)
 	_refresh_status_label()
 
 func advance_statuses(delta: float) -> void:
 	if dead or delta <= 0.0 or (is_inside_tree() and get_tree().paused):
 		return
+	if is_instance_valid(_control_immune_visual):
+		var immune_source := (_control_immune_visual.get_meta("source") as WeakRef).get_ref() as DuelFighter
+		if not is_instance_valid(immune_source) or immune_source.dead or not immune_source.enabled:
+			_clear_control_immune_visual()
 	for id: String in _control_recovery.keys():
 		_control_recovery[id] = maxf(0.0, float(_control_recovery[id]) - delta)
 		if is_zero_approx(float(_control_recovery[id])):
@@ -482,6 +501,13 @@ func advance_statuses(delta: float) -> void:
 				source.deal_status_damage(self, id, status)
 		if not dead and float(status.remaining) <= 0.0:
 			remove_status(id)
+		elif not dead and id == "shock" and _status_visuals.has(id):
+			# The three visible nodes are the actual remaining charges, not a VFX timer.
+			var arc_root := _status_visuals[id] as Node3D
+			for charge_index in 3:
+				var charge := arc_root.get_node_or_null("Charge%d" % charge_index) as Node3D
+				if charge:
+					charge.visible = charge_index < int(status.charges)
 
 func _spread_cursed_death() -> void:
 	if not has_status("curse") or bool(statuses.curse.secondary):
@@ -490,12 +516,323 @@ func _spread_cursed_death() -> void:
 	if not is_instance_valid(source) or not source.enabled or source.dead:
 		return
 	for recipient: Node3D in source.reaction_targets(self, 3.0, 3):
+		var transmitted := false
 		for id: String in ["burn", "poison", "bleed"]:
 			var carried := get_status(id)
 			if carried.is_empty() or bool(carried.secondary):
 				continue
 			var owner := (carried.source as WeakRef).get_ref() as DuelFighter
-			recipient.apply_status(id, owner, String(carried.skill_id), float(carried.remaining), float(carried.potency), true)
+			if recipient.apply_status(id, owner, String(carried.skill_id), float(carried.remaining), float(carried.potency), true):
+				transmitted = true
+		if transmitted and is_instance_valid(source.feedback):
+			source.feedback.curse_spread(global_position + Vector3.UP * 0.8, recipient.global_position + Vector3.UP * 0.8)
+
+func _ensure_status_visual(id: String, source: DuelFighter) -> void:
+	if _status_visuals.has(id) and is_instance_valid(_status_visuals[id]):
+		return
+	if not is_inside_tree() or not is_instance_valid(source.feedback):
+		return
+	var root := Node3D.new()
+	root.name = "Status" + id.capitalize()
+	root.set_meta("status_id", id)
+	root.set_meta("particle_slots", 16)
+	root.scale = Vector3.ONE * (1.5 if boss else (1.1 if elite else 1.0))
+	add_child(root)
+	_status_visuals[id] = root
+	var color: Color = STATUS_COLORS[id]
+	var sparks: GPUParticles3D = source.feedback.attach_trail(root, color, 8, 0.65)
+	var veil: GPUParticles3D = source.feedback.attach_trail(root, color.lerp(Color("eee7d7"), 0.2), 8, 0.8)
+	sparks.name = "StatusSparks"
+	veil.name = "StatusVeil"
+	for particles in [sparks, veil]:
+		particles.emitting = false
+		particles.local_coords = true
+		particles.position.y = 0.8
+		particles.visibility_aabb = AABB(Vector3(-1.2, -1.2, -1.2), Vector3(2.4, 3.2, 2.4))
+		var process := particles.process_material as ParticleProcessMaterial
+		process.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_BOX
+		process.emission_box_extents = Vector3(0.28, 0.44, 0.22)
+		process.direction = Vector3.UP
+		process.spread = 12.0
+		process.initial_velocity_min = 0.10
+		process.initial_velocity_max = 0.22
+		process.scale_min = 0.55
+		process.scale_max = 1.0
+		var particle_material := particles.draw_pass_1.material as StandardMaterial3D
+		particle_material.emission_energy_multiplier = 0.75
+	var fine := sparks.process_material as ParticleProcessMaterial
+	var soft := veil.process_material as ParticleProcessMaterial
+	soft.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_RING
+	soft.emission_ring_axis = Vector3.UP
+	soft.emission_ring_radius = 0.44
+	soft.emission_ring_inner_radius = 0.35
+	soft.emission_ring_height = 0.12
+	veil.position.y = 0.25
+	# Reuse the orb's native soft-spot construction, not a second particle shader.
+	# Only burn/poison use a veil; other statuses retain small directional fragments.
+	if id in ["burn", "poison"]:
+		var quad := QuadMesh.new()
+		quad.size = Vector2(0.18, 0.30 if id == "burn" else 0.17)
+		var mist_material := veil.draw_pass_1.material as StandardMaterial3D
+		mist_material.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
+		mist_material.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+		mist_material.emission_energy_multiplier = 0.25
+		var spot := GradientTexture2D.new()
+		spot.width = 32
+		spot.height = 32
+		spot.fill = GradientTexture2D.FILL_RADIAL
+		spot.fill_from = Vector2(0.5, 0.5)
+		spot.fill_to = Vector2(1.0, 0.5)
+		var gradient := Gradient.new()
+		gradient.set_color(0, Color(1, 1, 1, 0.26))
+		gradient.set_color(1, Color(1, 1, 1, 0))
+		spot.gradient = gradient
+		mist_material.albedo_texture = spot
+		quad.material = mist_material
+		veil.draw_pass_1 = quad
+	match id:
+		"burn":
+			sparks.name = "RisingEmbers"
+			veil.name = "ThinFlames"
+			fine.initial_velocity_min = 0.5
+			fine.initial_velocity_max = 1.0
+			fine.gravity = Vector3(0, 0.18, 0)
+			soft.initial_velocity_min = 0.28
+			soft.initial_velocity_max = 0.42
+		"bleed":
+			sparks.name = "FallingCrimson"
+			veil.name = "FaintBloodMotes"
+			fine.direction = Vector3.DOWN
+			fine.initial_velocity_min = 0.2
+			fine.initial_velocity_max = 0.5
+			fine.gravity = Vector3(0, -0.65, 0)
+			fine.particle_flag_align_y = true
+			(sparks.draw_pass_1 as SphereMesh).height = 0.105
+			soft.radial_velocity_min = 0.08
+			soft.radial_velocity_max = 0.15
+			soft.scale_min = 0.28
+			soft.scale_max = 0.55
+		"poison":
+			sparks.name = "JadeBubbles"
+			veil.name = "LowPoisonHaze"
+			fine.scale_min = 0.8
+			fine.scale_max = 1.4
+			soft.radial_velocity_min = 0.08
+			soft.radial_velocity_max = 0.12
+			soft.initial_velocity_min = 0.05
+			soft.initial_velocity_max = 0.12
+		"shock":
+			sparks.name = "AmberDischarge"
+			veil.name = "JadeCorona"
+			fine.initial_velocity_min = 0.55
+			fine.initial_velocity_max = 0.85
+			fine.spread = 100.0
+			fine.particle_flag_align_y = true
+			(sparks.draw_pass_1 as SphereMesh).height = 0.10
+			veil.position.y = 0.85
+			var corona_ramp := soft.color_ramp as GradientTexture1D
+			corona_ramp.gradient.set_color(0, Color("c6f1e9"))
+			corona_ramp.gradient.set_color(1, Color("80d6cf"))
+			corona_ramp.gradient.set_color(2, Color(0.35, 0.86, 0.80, 0.0))
+			(veil.draw_pass_1.material as StandardMaterial3D).emission = Color("80d6cf")
+			var arcs := _status_lines(root, "ChargeArcs", [
+				PackedVector3Array([Vector3(-0.42, 0.3, 0.2), Vector3(-0.52, 0.67, 0.1), Vector3(-0.35, 0.80, 0.26), Vector3(-0.48, 1.15, 0.1), Vector3(-0.24, 1.42, 0.0)]),
+				PackedVector3Array([Vector3(0.38, 0.28, -0.14), Vector3(0.49, 0.68, -0.06), Vector3(0.32, 0.86, -0.2), Vector3(0.45, 1.12, -0.12), Vector3(0.22, 1.4, 0.04)]),
+			], Color("f6d395"), source.feedback)
+			var arc_turn := arcs.create_tween().set_loops()
+			arc_turn.tween_property(arcs, "rotation:y", TAU, 2.6).from(0.0)
+			for charge_index in 3:
+				var charge := MeshInstance3D.new()
+				charge.name = "Charge%d" % charge_index
+				var bead := SphereMesh.new()
+				bead.radius = 0.035
+				bead.height = 0.07
+				bead.radial_segments = 6
+				bead.rings = 2
+				charge.mesh = bead
+				charge.material_override = source.feedback._emissive(Color("f6d395"), 0.7)
+				charge.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+				root.add_child(charge)
+				charge.position = Vector3((charge_index - 1) * 0.14, 1.6, 0)
+		"curse":
+			sparks.name = "InwardCurseSeeds"
+			veil.name = "VioletResidue"
+			fine.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_RING
+			fine.emission_ring_axis = Vector3.UP
+			fine.emission_ring_radius = 0.52
+			fine.emission_ring_inner_radius = 0.44
+			fine.emission_ring_height = 0.3
+			fine.radial_velocity_min = -0.5
+			fine.radial_velocity_max = -0.3
+			veil.position.y = 1.1
+			var sigil := MeshInstance3D.new()
+			sigil.name = "CurseSigil"
+			var quad := QuadMesh.new()
+			quad.size = Vector2.ONE * 0.65
+			sigil.mesh = quad
+			sigil.rotation.x = -PI / 2.0
+			sigil.position.y = 1.65
+			sigil.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			var ink := ShaderMaterial.new()
+			ink.shader = preload("res://shaders/astral_ring.gdshader")
+			ink.set_shader_parameter("warning", false)
+			ink.set_shader_parameter("progress", 0.3)
+			ink.set_shader_parameter("tint", Color("8835e5"))
+			ink.set_shader_parameter("edge", Color("ca8dff"))
+			sigil.material_override = ink
+			root.add_child(sigil)
+			var sigil_turn := sigil.create_tween().set_loops()
+			sigil_turn.tween_property(sigil, "rotation:z", -TAU, 4.0).from(0.0)
+		"freeze":
+			sparks.name = "FrostCrystals"
+			veil.name = "FallingRime"
+			fine.initial_velocity_min = 0.01
+			fine.initial_velocity_max = 0.06
+			soft.direction = Vector3.DOWN
+			soft.initial_velocity_min = 0.1
+			soft.initial_velocity_max = 0.2
+			veil.position.y = 1.2
+			var frost := PrismMesh.new()
+			frost.size = Vector3(0.035, 0.08, 0.025)
+			frost.material = sparks.draw_pass_1.material
+			sparks.draw_pass_1 = frost
+			var crystal_paths: Array[PackedVector3Array] = []
+			for facet in 3:
+				var edge := Vector3(0.53, 0, 0).rotated(Vector3.UP, facet * PI / 3.0)
+				crystal_paths.append(PackedVector3Array([Vector3(0, 0.08, 0), edge + Vector3.UP * 0.66, Vector3(0, 1.78, 0), -edge + Vector3.UP * 0.66, Vector3(0, 0.08, 0)]))
+			_status_lines(root, "OpenIceContours", crystal_paths, Color("bce8f3"), source.feedback)
+		"bind":
+			sparks.name = "SilkKnotSparks"
+			veil.name = "ReturningGoldDust"
+			fine.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_RING
+			fine.emission_ring_axis = Vector3.UP
+			fine.emission_ring_radius = 0.50
+			fine.emission_ring_inner_radius = 0.45
+			fine.emission_ring_height = 0.08
+			sparks.position.y = 0.93
+			soft.radial_velocity_min = -0.15
+			soft.radial_velocity_max = -0.09
+			var lower := _status_contour(root, "AnkleBind", 0.53, 0.32, color, source.feedback)
+			var upper := _status_contour(root, "SilkBind", 0.52, 1.0, color.lerp(Color("f6d395"), 0.35), source.feedback)
+			upper.rotation.z = 0.18
+			lower.rotation.z = -0.12
+			var knot := _status_lines(root, "BindKnot", [PackedVector3Array([Vector3(-0.20, 0.72, 0.53), Vector3(0, 0.91, 0.55), Vector3(0.20, 0.72, 0.53), Vector3(0, 0.56, 0.55), Vector3(-0.20, 0.72, 0.53)])], Color("f6d395"), source.feedback)
+			var knot_breath := knot.create_tween().set_loops()
+			knot_breath.tween_property(knot, "transparency", 0.35, 0.5)
+			knot_breath.tween_property(knot, "transparency", 0.0, 0.5)
+		"stun":
+			sparks.name = "OrbitingGoldMotes"
+			veil.name = "DriftingStarlight"
+			sparks.position.y = 1.75
+			veil.position.y = 1.65
+			fine.emission_box_extents = Vector3(0.35, 0.05, 0.35)
+			soft.initial_velocity_min = 0.02
+			soft.initial_velocity_max = 0.05
+			var motes_turn := sparks.create_tween().set_loops()
+			motes_turn.tween_property(sparks, "rotation:y", TAU, 1.8).from(0.0)
+			var starlight_turn := veil.create_tween().set_loops()
+			starlight_turn.tween_property(veil, "rotation:y", -TAU, 2.4).from(0.0)
+			var orbit := _status_contour(root, "StunOrbit", 0.39, 1.75, color, source.feedback)
+			orbit.rotation.z = 0.20
+			var stars: Array[PackedVector3Array] = []
+			for star_index in 3:
+				var point := Vector3(0.39, 0, 0).rotated(Vector3.UP, star_index * TAU / 3.0)
+				stars.append(PackedVector3Array([point + Vector3.LEFT * 0.075, point + Vector3.UP * 0.10, point + Vector3.RIGHT * 0.075, point + Vector3.DOWN * 0.10, point + Vector3.LEFT * 0.075]))
+			_status_lines(orbit, "StunStars", stars, Color("fff0c1"), source.feedback)
+			var orbit_turn := orbit.create_tween().set_loops()
+			orbit_turn.tween_property(orbit, "rotation:y", TAU, 1.8).from(0.0)
+	for particles in [sparks, veil]:
+		particles.emitting = true
+
+func _status_contour(parent: Node3D, label: String, radius: float, height: float, color: Color, feedback: Node3D) -> MeshInstance3D:
+	var ring := MeshInstance3D.new()
+	ring.name = label
+	var mesh := TorusMesh.new()
+	mesh.inner_radius = radius - 0.012
+	mesh.outer_radius = radius
+	mesh.rings = 32
+	mesh.ring_segments = 4
+	ring.mesh = mesh
+	ring.material_override = feedback._emissive(Color(color, 0.55), 0.65)
+	ring.material_override.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	ring.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	parent.add_child(ring)
+	ring.position.y = height
+	return ring
+
+func _status_lines(parent: Node3D, label: String, paths: Array[PackedVector3Array], color: Color, feedback: Node3D) -> MeshInstance3D:
+	# Thin native ribbons keep the enemy silhouette open, even with all statuses.
+	var line := MeshInstance3D.new()
+	line.name = label
+	var mesh := ImmediateMesh.new()
+	mesh.surface_begin(Mesh.PRIMITIVE_TRIANGLES)
+	for path in paths:
+		for point_index in range(path.size() - 1):
+			var a := path[point_index]
+			var b := path[point_index + 1]
+			var side := (b - a).cross(Vector3(0, 0.86, 0.52)).normalized() * 0.008
+			for vertex in [a - side, a + side, b + side, a - side, b + side, b - side]:
+				mesh.surface_add_vertex(vertex)
+	mesh.surface_end()
+	line.mesh = mesh
+	line.material_override = feedback._emissive(Color(color, 0.62), 0.8)
+	line.material_override.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	line.material_override.cull_mode = BaseMaterial3D.CULL_DISABLED
+	line.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	parent.add_child(line)
+	return line
+
+func _clear_status_visual(id: String) -> void:
+	var root := _status_visuals.get(id) as Node3D
+	_status_visuals.erase(id)
+	if is_instance_valid(root):
+		root.hide()
+		# Detaching makes removal immediate; queued deletion releases GPU resources.
+		remove_child(root)
+		root.queue_free()
+
+func clear_status_visuals() -> void:
+	# The arena also calls this before freezing the victory/defeat result screen.
+	# It does not edit damage, remaining lifetime, control recovery or any stat.
+	for id: String in _status_visuals.keys():
+		_clear_status_visual(id)
+	_clear_control_immune_visual()
+
+func _show_control_immunity(source: DuelFighter, reason: String) -> void:
+	if is_instance_valid(_control_immune_visual) or not is_instance_valid(source.feedback):
+		return
+	var root := Node3D.new()
+	root.name = "ControlImmunity"
+	root.set_meta("reason", reason)
+	root.set_meta("source", weakref(source))
+	add_child(root)
+	_control_immune_visual = root
+	var label := Label3D.new()
+	label.name = "ImmuneLabel"
+	label.font = preload("res://assets/fonts/interface.tres")
+	label.font_size = 24
+	label.pixel_size = 0.006
+	label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	label.no_depth_test = true
+	label.modulate = Color("c9c3ae")
+	label.text = "免控" if reason == "boss" else "定神·免控"
+	label.position.y = 3.6 if boss else 2.35
+	root.add_child(label)
+	var rim := _status_contour(root, "ImmuneRim", 0.78 if boss else 0.55, 0.09, Color("a9b8bc"), source.feedback)
+	var fade := root.create_tween().set_parallel()
+	fade.tween_property(label, "modulate:a", 0.0, 0.65)
+	fade.tween_property(label, "position:y", label.position.y + 0.18, 0.65)
+	fade.tween_property(rim, "transparency", 1.0, 0.65)
+	fade.chain().tween_callback(func() -> void:
+		if _control_immune_visual == root:
+			_clear_control_immune_visual())
+
+func _clear_control_immune_visual() -> void:
+	if is_instance_valid(_control_immune_visual):
+		_control_immune_visual.hide()
+		remove_child(_control_immune_visual)
+		_control_immune_visual.queue_free()
+	_control_immune_visual = null
 
 func _refresh_status_label() -> void:
 	if statuses.is_empty():
