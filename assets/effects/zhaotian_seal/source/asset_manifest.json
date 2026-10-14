@@ -1,0 +1,12 @@
+{
+  "mesh_instances": 15,
+  "material_surfaces": 57,
+  "fracture_chunks": 15,
+  "triangles": 28128,
+  "materials_reused": [
+    "AE_Gold"
+  ],
+  "animation": "SealShatter",
+  "duration_seconds": 1.2,
+  "preview": "Blender model only, not runtime GPU particles"
+}

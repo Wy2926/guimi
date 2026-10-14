@@ -5,8 +5,8 @@
 [resource]
 script = ExtResource("1")
 id = "meteor"
-title = "流星"
-description = "近战出招触发火属性流星；读取魔法攻击力，不由辅助命中递归触发。"
+title = "罗宣·照天印"
+description = "近战出招有28%概率祭起火印，预警后镇落，印体投影崩裂为余烬；造成火属性范围魔法伤害，碎片不重复结算。"
 category = "passive"
 kind = 1
 coefficient = 1.28

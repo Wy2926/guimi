@@ -12,6 +12,8 @@ Godot 4.7 的 2.5D 竞技场肉鸽原型。双击 `Play.cmd` 启动，或用 God
 
 首个阵法光环：[太上老君·太极图](docs/gameplay-architecture.md#太上老君太极图)：随身两仪八卦阵、周期清气伤害、反向转环与四层粒子；概念图、Blender 源文件及 GLB 均保存在 `assets/effects/taiji_aura/`。
 
+火法坠击：[罗宣·照天印](docs/gameplay-architecture.md#罗宣照天印)：按实例图制作朱砂火印，悬印蓄势、镇落顿压、15 块原体崩裂与六层粒子；替换旧流星资源，保留原技能成长入口。实例图、Blender 源文件及带碎裂动画的 GLB 位于 `assets/effects/zhaotian_seal/`。
+
 ## 架构
 
 `arena.gd` 组装对局并管理暂停、胜负与重开；玩家、敌人、成长、刷怪、技能和界面各自负责本域逻辑，通过显式依赖与信号协作。属性和技能数值使用原生 Resource，伤害统一由 `damage_rules.gd` 计算，表现复用场景、动画、粒子与着色器。

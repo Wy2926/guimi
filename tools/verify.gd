@@ -23,6 +23,7 @@ var max_active_orbs := 0
 var sword_checks_completed := false
 var orb_checks_completed := false
 var aura_checks_completed := false
+var seal_checks_completed := false
 var performance: Dictionary = {"requested": false}
 
 func _ready() -> void:
@@ -156,6 +157,8 @@ func run() -> void:
 	await check_incoming_damage()
 	await check_pickups_and_choices()
 	await check_pause()
+	await check_zhaotian_seal()
+	check(seal_checks_completed, "Zhaotian Seal checks finish without a skipped runtime error")
 	await check_auxiliary_skills()
 	check(sword_checks_completed, "The automatic sword integration checks reach completion without a skipped runtime error")
 	await check_thunder_orbs()
@@ -556,6 +559,76 @@ func horizontal_formation() -> bool:
 		centered = centered and absf(Vector2(offset.x, offset.z).length() - 1.65) < 0.01
 		centered = centered and absf(blade.global_basis.y.normalized().dot(Vector3.UP)) < 0.01 and blade.global_basis.z.normalized().dot(Vector3.UP) > 0.99
 	return centered and Vector2(center.x, center.z).length() < 0.01
+
+func check_zhaotian_seal() -> void:
+	await prepare(false)
+	var definition: SkillDefinition = scene.progression.skill("meteor")
+	check(definition.title == "罗宣·照天印" and definition.resource_path.ends_with("zhaotian_seal.tres") and not FileAccess.file_exists("res://data/skills/meteor.tres"), "The legacy meteor resource is replaced, not duplicated; the stable run-state ID is preserved")
+	check(definition.kind == DamageRules.Kind.MAGICAL and definition.element == DamageRules.Element.FIRE and is_equal_approx(definition.coefficient_at(5), 2.304), "All five seal ranks retain the existing fixed-fire magical damage progression")
+	scene.progression.skills.meteor = 1
+	scene.player.stats.magic_attack = 80.0
+	scene.player.stats.element = DamageRules.Element.DARK
+	scene.player.stats.element_bonus[0] = 0.2
+	scene.player.stats.element_bonus[3] = 0.8
+	var target := enemy_at(Vector3(0, 0.04, -4.0), 10000.0)
+	target.stats.resistances = [0.3, 0.0, 0.0, -0.5]
+	var nearby := enemy_at(Vector3(2.2, 0.04, -4.0), 10000.0)
+	var outside := enemy_at(Vector3(3.35, 0.04, -4.0), 10000.0)
+	scene.storm._call_meteor(target)
+	var flight: Dictionary = scene.storm.meteors[0]
+	var seal: Node3D = flight.node
+	var seal_id := seal.get_instance_id()
+	var shard := seal.model.find_child("Shard_00", true, false) as Node3D
+	check(seal.model.scene_file_path.ends_with("zhaotian_seal.glb") and seal.model.find_children("*", "MeshInstance3D", true, false).size() == 15 and is_instance_valid(shard), "The falling seal loads the actual Blender asset with twelve stone and three knob chunks")
+	check(is_instance_valid(seal.animation) and seal.animation.has_animation("SealShatter") and not seal.animation.is_playing(), "The native imported fracture clip stays intact until actual ground contact")
+	if not is_instance_valid(shard) or not is_instance_valid(seal.animation):
+		return
+	var slots := 0
+	for emitter: GPUParticles3D in seal.emitters:
+		slots += emitter.amount
+	check(seal.emitters.size() == 3 and slots == 68 and not seal.energy_meshes.is_empty(), "Three directional flight particle layers use 68 slots and the existing energy shader")
+	check(is_equal_approx(flight.warning.mesh.size.x * 0.5 * 0.972, flight.radius), "The fixed warning edge matches the actual seal damage radius")
+	await physics_wait(0.70)
+	check(target.health == 10000.0 and not seal.landed and not seal.animation.is_playing(), "Suspended charge and accelerating descent cannot deal damage or fracture early")
+	var landed := await until(func() -> bool: return seal.landed, 0.35)
+	check(landed and seal.global_position.distance_to(flight.position) < 0.001 and scene.storm.meteors.is_empty(), "One physics-owned contact snaps the seal to the ground and retires its flight")
+	check(target.health == 9908.0 and nearby.health < 10000.0 and outside.health == 10000.0 and scene.storm.meteor_hits == 2, "Ground impact deals 92 fire-magic damage through shared resistance math and never hits beyond its boundary")
+	check(nearby._push.x > 0.0 and nearby._stagger_left > 0.0, "The stamp reuses enemy heavy-hit stagger and pushes outward from its contact point")
+	var contact_health := target.health
+	var hits: int = scene.storm.meteor_hits
+	await physics_wait(0.12)
+	var no_wake := true
+	for emitter: GPUParticles3D in seal.emitters:
+		no_wake = no_wake and not emitter.emitting
+	check(no_wake and seal.find_children("Seal*", "GPUParticles3D", true, false).size() == 3 and seal.animation.is_playing(), "Impact stops all wakes, starts three owned burst layers and plays the real fracture clip")
+	scene.toggle_pause()
+	var paused_age: float = seal.age
+	var paused_time: float = seal.animation.current_animation_position
+	var paused_pose := shard.transform
+	await physics_wait(0.24)
+	check(seal.age == paused_age and seal.animation.current_animation_position == paused_time and shard.transform.is_equal_approx(paused_pose), "Pause freezes the fracture pose, model animation and local shader clock together")
+	scene.toggle_pause()
+	await physics_wait(0.26)
+	check(not shard.transform.is_equal_approx(paused_pose) and scene.storm.meteor_hits == hits and target.health == contact_health, "The same visible chunks scatter and tumble without a second damage event")
+	await physics_wait(1.15)
+	check(not is_instance_id_valid(seal_id) and target.health == contact_health, "All seal chunks, six particle layers and bound effects expire after their animation")
+	check(scene.hud._skill_widgets.meteor.title.text.contains("照天印") and scene.hud._skill_widgets.meteor.binding.text.contains("罗宣"), "HUD uses the short seal name and its owner without widening the skill row")
+	# Native owners must cancel both the in-flight and the post-contact phases.
+	scene.storm._call_meteor(target)
+	var cancelled: Node3D = scene.storm.meteors[0].node
+	var cancelled_id := cancelled.get_instance_id()
+	var warning_id: int = scene.storm.meteors[0].warning.get_instance_id()
+	scene.storm.reset()
+	await physics_wait(1.0)
+	check(not is_instance_id_valid(cancelled_id) and not is_instance_id_valid(warning_id) and target.health == contact_health, "Reset cancels the falling seal, its warning and its pending damage")
+	scene.storm._call_meteor(target)
+	var stopped: Node3D = scene.storm.meteors[0].node
+	var stopped_id := stopped.get_instance_id()
+	await until(func() -> bool: return stopped.landed, 1.0)
+	scene.storm.active = false
+	await physics_wait(0.06)
+	check(not is_instance_id_valid(stopped_id), "Disabling auxiliary effects also frees already-landed chunks after the flight list is empty")
+	seal_checks_completed = true
 
 func check_auxiliary_skills() -> void:
 	await prepare(false)

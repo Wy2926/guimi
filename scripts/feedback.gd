@@ -57,8 +57,12 @@ func prewarm(fighter: DuelFighter) -> void:
 	storm_activate(Vector3(0, 0.08, 0))
 	storm_muzzle(Vector3(0, 2.3, 0))
 	storm_hit(Vector3(0, 1.0, 0), Vector3.FORWARD)
-	meteor_warning(Vector3.ZERO, 0.5)
-	meteor_impact(Vector3.ZERO)
+	seal_warning(Vector3.ZERO, 0.5)
+	var seal := preload("res://assets/effects/zhaotian_seal/zhaotian_seal.gd").new()
+	seal.feedback = self
+	add_child(seal)
+	seal.shatter()
+	seal_impact(Vector3.ZERO, 1.0, seal)
 	await get_tree().create_timer(1.1, false).timeout
 	if is_instance_valid(aura):
 		aura.free()
@@ -304,16 +308,18 @@ func storm_hit(pos: Vector3, direction: Vector3, lethal := false) -> void:
 	add_child(impact)
 	impact.global_position = pos
 
-func meteor_warning(pos: Vector3, duration: float, radius := 3.2) -> MeshInstance3D:
+func seal_warning(pos: Vector3, duration: float, radius := 3.2) -> MeshInstance3D:
 	# The outside circle declares the damage radius; the inner one closes.
-	return _astral_ring(Vector3(pos.x, 0.095, pos.z), radius * 2.0, maxf(0.05, duration), true, Color("f66a24"), Color("ffdd94"))
+	# astral_ring's outer stroke is at UV radius 0.972, not the quad's edge.
+	return _astral_ring(Vector3(pos.x, 0.095, pos.z), radius * 2.0 / 0.972, maxf(0.05, duration), true, Color("f66a24"), Color("ffdd94"))
 
-func meteor_impact(pos: Vector3, range_scale := 1.0) -> void:
+func seal_impact(pos: Vector3, range_scale := 1.0, owner_node: Node3D = null) -> void:
 	var center := Vector3(pos.x, 0.18, pos.z)
 	sound("impact", center, -1.0, 0.52)
 	sound("crack", center, -8.0, 0.55)
 	sound("shatter", center, -17.0, 0.72)
 	var fragments := _burst(center, Vector3.UP, 48, Color("ffb05b"), 0.7, 8.5, 0.09)
+	fragments.name = "SealContactSparks"
 	var process := fragments.process_material as ParticleProcessMaterial
 	process.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_RING
 	process.emission_ring_axis = Vector3.UP
@@ -323,15 +329,51 @@ func meteor_impact(pos: Vector3, range_scale := 1.0) -> void:
 	process.spread = 72.0
 	process.gravity = Vector3(0, -13.0, 0)
 	var embers := _burst(center, Vector3.UP, 26, Color("ff763c"), 1.0, 3.0, 0.044)
+	embers.name = "SealRisingEmbers"
 	var ember_process := embers.process_material as ParticleProcessMaterial
 	ember_process.gravity = Vector3(0, 0.65, 0)
 	ember_process.spread = 80.0
 	ember_process.radial_accel_min = 1.0
 	ember_process.radial_accel_max = 2.4
-	_burst(center, Vector3.UP, 14, Color("be9270"), 0.7, 3.4, 0.075)
-	ground_ring(Vector3(pos.x, 0.07, pos.z), Color("ffbe70"), 0.43, 7.0 * range_scale)
-	ground_ring(Vector3(pos.x, 0.075, pos.z), Color("f46b36"), 0.65, 8.0 * range_scale)
-	_light_flash(center + Vector3.UP * 0.75, Color("ffb15e"), 4.5, 6.0, 0.26)
+	var dust := _burst(center, Vector3.UP, 14, Color("a17b61"), 0.72, 3.4, 0.075)
+	dust.name = "SealGroundDust"
+	var dust_process := dust.process_material as ParticleProcessMaterial
+	dust_process.spread = 88.0
+	dust_process.gravity = Vector3(0, -1.0, 0)
+	# Unlit, non-emissive, softly transparent dust instead of another bright spark.
+	var dust_mesh := QuadMesh.new()
+	dust_mesh.size = Vector2.ONE * 0.36
+	var dust_material := StandardMaterial3D.new()
+	dust_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	dust_material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	dust_material.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
+	dust_material.vertex_color_use_as_albedo = true
+	var gradient := Gradient.new()
+	gradient.set_color(0, Color(1, 1, 1, 0.22))
+	gradient.set_color(1, Color(1, 1, 1, 0))
+	var texture := GradientTexture2D.new()
+	texture.gradient = gradient
+	texture.fill = GradientTexture2D.FILL_RADIAL
+	texture.fill_from = Vector2(0.5, 0.5)
+	texture.fill_to = Vector2(0.5, 1.0)
+	dust_material.albedo_texture = texture
+	dust_mesh.material = dust_material
+	dust.draw_pass_1 = dust_mesh
+	for particles in [fragments, embers, dust]:
+		if is_instance_valid(owner_node):
+			particles.reparent(owner_node)
+			var placement: Transform3D = particles.global_transform
+			particles.top_level = true
+			particles.global_transform = placement
+	var shock := ground_ring(Vector3(pos.x, 0.07, pos.z), Color("ffbe70"), 0.28, 3.2 * range_scale / 0.46)
+	var echo := ground_ring(Vector3(pos.x, 0.075, pos.z), Color("f46b36"), 0.48, 2.75 * range_scale / 0.46)
+	var flash := _light_flash(center + Vector3.UP * 0.75, Color("ffb15e"), 4.5, 6.0, 0.14)
+	for effect in [shock, echo, flash]:
+		if is_instance_valid(owner_node):
+			effect.reparent(owner_node)
+			var placement: Transform3D = effect.global_transform
+			effect.top_level = true
+			effect.global_transform = placement
 
 func attach_trail(parent: Node3D, color: Color, amount: int = 18, lifetime: float = 0.26) -> GPUParticles3D:
 	# Native world-space particles leave a curved wake as their parent follows Curve3D.
@@ -396,7 +438,7 @@ func _astral_ring(pos: Vector3, diameter: float, duration: float, warning: bool,
 	tween.tween_callback(ring.queue_free)
 	return ring
 
-func _light_flash(pos: Vector3, color: Color, energy: float, radius: float, duration: float) -> void:
+func _light_flash(pos: Vector3, color: Color, energy: float, radius: float, duration: float) -> OmniLight3D:
 	var light := OmniLight3D.new()
 	light.light_color = color
 	light.light_energy = energy
@@ -407,6 +449,7 @@ func _light_flash(pos: Vector3, color: Color, energy: float, radius: float, dura
 	var tween := light.create_tween()
 	tween.tween_property(light, "light_energy", 0.0, duration).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
 	tween.tween_callback(light.queue_free)
+	return light
 
 func _energy_wave(pos: Vector3, diameter: float, duration: float, inward := false) -> void:
 	var ring := MeshInstance3D.new()
@@ -461,7 +504,7 @@ func impact(pos: Vector3, direction: Vector3, lethal: bool, heavy := false, ghos
 		fade.tween_callback(ray.queue_free)
 	ground_ring(Vector3(pos.x, 0.06, pos.z), color, 0.5 if heavy or lethal else 0.3)
 
-func ground_ring(pos: Vector3, color: Color, duration: float, scale_factor := 3.3) -> void:
+func ground_ring(pos: Vector3, color: Color, duration: float, scale_factor := 3.3) -> MeshInstance3D:
 	var ring := MeshInstance3D.new()
 	var mesh := TorusMesh.new()
 	mesh.inner_radius = 0.44
@@ -473,10 +516,11 @@ func ground_ring(pos: Vector3, color: Color, duration: float, scale_factor := 3.
 	ring.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(ring)
 	ring.global_position = pos
-	var tween := create_tween().set_parallel(true)
+	var tween := ring.create_tween().set_parallel(true)
 	tween.tween_property(ring, "scale", Vector3(scale_factor, 0.1, scale_factor), duration).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
 	tween.tween_property(ring, "transparency", 1.0, duration)
 	tween.chain().tween_callback(ring.queue_free)
+	return ring
 
 func _burst(pos: Vector3, direction: Vector3, amount: int, color: Color, lifetime: float, speed: float, size: float) -> GPUParticles3D:
 	var particles := GPUParticles3D.new()

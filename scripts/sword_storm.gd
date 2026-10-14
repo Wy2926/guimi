@@ -17,6 +17,7 @@ const ORBIT_SPEED := 0.55
 const VOLLEY_INTERVAL := 0.24
 const METEOR_RADIUS := 3.2
 const METEOR_DELAY := 0.9
+const SEAL_VISUAL := preload("res://assets/effects/zhaotian_seal/zhaotian_seal.gd")
 
 enum FlightPhase { APPROACH, STRIKE, RETURN }
 
@@ -143,7 +144,7 @@ func _targets() -> Array[Node3D]:
 func _physics_process(delta: float) -> void:
 	clock += delta
 	if player.dead or not player.enabled:
-		if not flights.is_empty() or not meteors.is_empty():
+		if get_child_count() > (1 if is_instance_valid(halo) else 0):
 			reset()
 		if is_instance_valid(halo):
 			halo.hide()
@@ -152,7 +153,7 @@ func _physics_process(delta: float) -> void:
 	if is_instance_valid(halo):
 		_update_formation()
 	if not active:
-		if not flights.is_empty() or not meteors.is_empty():
+		if get_child_count() > (1 if is_instance_valid(halo) else 0):
 			reset()
 		return
 	volley_left = maxf(0.0, volley_left - delta)
@@ -374,30 +375,24 @@ func _call_meteor(target: Node3D) -> void:
 	var point := target.global_position
 	point.y = 0.08
 	var radius := METEOR_RADIUS * player.stats.range_multiplier
-	var warning: MeshInstance3D = feedback.meteor_warning(point, METEOR_DELAY, radius)
+	var warning: MeshInstance3D = feedback.seal_warning(point, METEOR_DELAY, radius)
 	# Keep the warning with its gameplay owner so toggling/death also cancels it.
 	warning.reparent(self)
-	var meteor := Node3D.new()
+	var start := point + Vector3(-1.6, 7.8, -1.2)
+	var meteor := SEAL_VISUAL.new()
+	meteor.name = "ZhaotianSeal"
+	meteor.feedback = feedback
+	meteor.flight_vector = (start - point).normalized()
+	meteor.position = to_local(start)
+	meteor.rotation = Vector3(0.12, rng.randf_range(-PI, PI), -0.09)
+	meteor.scale = Vector3.ONE * (0.9 + 0.06 * progression.skill_level("meteor"))
 	add_child(meteor)
-	var core := MeshInstance3D.new()
-	var rock := SphereMesh.new()
-	rock.radius = 0.36
-	rock.height = 0.78
-	rock.radial_segments = 8
-	rock.rings = 4
-	core.mesh = rock
-	core.material_override = feedback._emissive(Color("ffb95d"), 4.0)
-	core.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	meteor.add_child(core)
-	var trail: GPUParticles3D = feedback.attach_trail(meteor, Color("ffad52"), 80, 0.48)
-	var process := trail.process_material as ParticleProcessMaterial
-	process.scale_min *= 2.8
-	process.scale_max *= 3.2
-	var start := point + Vector3(-3.8, 9.0, -2.7)
-	meteor.global_position = start
 	var descent := meteor.create_tween().set_process_mode(Tween.TWEEN_PROCESS_PHYSICS)
-	descent.tween_property(meteor, "global_position", point, METEOR_DELAY).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
-	meteors.append({"node": meteor, "core": core, "trail": trail, "position": point, "start": start, "left": METEOR_DELAY, "radius": radius})
+	# Brief suspended charge followed by a committed, accelerating stamp.
+	descent.tween_interval(0.22)
+	descent.tween_property(meteor, "global_position", point, METEOR_DELAY - 0.22).set_trans(Tween.TRANS_CUBIC).set_ease(Tween.EASE_IN)
+	descent.parallel().tween_property(meteor, "rotation", Vector3(0, meteor.rotation.y, 0), METEOR_DELAY - 0.22)
+	meteors.append({"node": meteor, "tween": descent, "warning": warning, "position": point, "start": start, "left": METEOR_DELAY, "radius": radius})
 
 func _advance_meteors(delta: float) -> void:
 	for i in range(meteors.size() - 1, -1, -1):
@@ -406,7 +401,15 @@ func _advance_meteors(delta: float) -> void:
 		if meteor.left > 0.0:
 			continue
 		var point: Vector3 = meteor.position
-		feedback.meteor_impact(point, float(meteor.radius) / METEOR_RADIUS)
+		# Physics owns the exact contact tick; a tween never damages at a distance.
+		meteor.tween.kill()
+		meteor.node.global_position = point
+		meteor.node.rotation.x = 0.0
+		meteor.node.rotation.z = 0.0
+		if is_instance_valid(meteor.warning):
+			meteor.warning.queue_free()
+		meteor.node.shatter()
+		feedback.seal_impact(point, float(meteor.radius) / METEOR_RADIUS, meteor.node)
 		meteor_query.shape.radius = meteor.radius
 		meteor_query.transform = Transform3D(Basis.IDENTITY, point + Vector3.UP * 0.6)
 		var hit_ids: Array[int] = []
@@ -414,14 +417,13 @@ func _advance_meteors(delta: float) -> void:
 			var body := result.collider as Node3D
 			if not is_instance_valid(body) or body.dead or not body.is_visible_in_tree() or body.get_instance_id() in hit_ids:
 				continue
+			var offset := Vector2(body.global_position.x - point.x, body.global_position.z - point.z)
+			if offset.length_squared() > float(meteor.radius) * float(meteor.radius):
+				continue
 			hit_ids.append(body.get_instance_id())
 			var definition := progression.skill("meteor")
-			var hit := player.deal_damage(body, definition.kind, progression.coefficient("meteor"), definition.element, true, false, "流星")
+			var direction := (body.global_position - point).normalized()
+			var hit := player.deal_damage(body, definition.kind, progression.coefficient("meteor"), definition.element, true, false, "照天印", direction)
 			if hit.get("actual", 0) > 0:
 				meteor_hits += 1
-		meteor.core.hide()
-		meteor.trail.emitting = false
-		var fade: Tween = meteor.node.create_tween()
-		fade.tween_interval(0.5)
-		fade.tween_callback(meteor.node.queue_free)
 		meteors.remove_at(i)
