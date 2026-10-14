@@ -47,7 +47,6 @@ func _ready() -> void:
 	storm.player = player
 	storm.progression = progression
 	storm.feedback = feedback
-	storm.camera = camera
 	add_child(storm)
 	orbs = ORBS_SCRIPT.new()
 	orbs.name = "ThunderOrbs"
@@ -210,9 +209,8 @@ func _on_hit(target: Node3D, point: Vector3, result: Dictionary, heavy: bool, so
 		return
 	_impact_left = 0.07
 	var direction := (target.global_position - player.global_position).normalized()
-	if source == "飞剑":
-		feedback.storm_hit(point, direction, lethal)
-	elif source not in ["流星", "雷缚珠"]:
+	# Sword contact owns its directional flash; only camera/haptics share this budget.
+	if source not in ["飞剑", "流星", "雷缚珠"]:
 		feedback.impact(point, direction, lethal, heavy, player.ghost_active, player.combo_finisher)
 	shake_time = 0.16
 	shake_power = 0.055 if heavy else 0.025

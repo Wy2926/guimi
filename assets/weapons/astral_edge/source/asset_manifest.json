@@ -1,6 +1,6 @@
 {
   "name": "苍穹 · 裂星 / Astral Edge 01",
-  "status": "standalone_visual_prototype_not_integrated_into_combat",
+  "status": "integrated_into_sword_storm_with_standalone_showcase",
   "concept": "../concept/astral_edge-v1.png",
   "concept_prompt": "../concept/prompt.txt",
   "concept_method": "built-in image_gen tool",
@@ -18,7 +18,7 @@
     "length": 3.55,
     "set_motion": ["IDLE=0", "CHARGE=1", "FLIGHT=2", "RETURN=3"],
     "ownership": "caller owns root transform, target, collision and damage; asset owns local decorative movement, materials and trail",
-    "impact": "instantiate the standalone impact scene at the contact point; it frees itself after 0.65 seconds"
+    "impact": "instantiate at the confirmed contact, set direction to the incoming strike vector; a sharp directional white-blue flash and shards free themselves after 0.5 seconds"
   },
   "showcase_controls": {
     "Space": "pause/resume",

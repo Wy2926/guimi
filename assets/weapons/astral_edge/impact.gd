@@ -1,6 +1,9 @@
 extends Node3D
 ## Standalone hit accent; no damage, camera shake or gameplay dependencies.
 const FLASH = preload("res://assets/weapons/astral_edge/impact.gdshader")
+const FLASH_DURATION := 0.32
+const LIFETIME := 0.5
+var direction := Vector3.ZERO
 var age := 0.0
 var material: ShaderMaterial
 var flash: MeshInstance3D
@@ -18,16 +21,16 @@ func _ready() -> void:
 	var particles := GPUParticles3D.new()
 	particles.one_shot = true
 	particles.explosiveness = 1.0
-	particles.amount = 24
-	particles.lifetime = 0.45
+	particles.amount = 18
+	particles.lifetime = 0.35
 	particles.local_coords = false
 	particles.visibility_aabb = AABB(Vector3(-4,-4,-4),Vector3(8,8,8))
 	var process := ParticleProcessMaterial.new()
-	process.gravity = Vector3(0,-2.0,0)
-	process.direction = Vector3.UP
-	process.spread = 180
-	process.initial_velocity_min = 2.0
-	process.initial_velocity_max = 4.5
+	process.gravity = Vector3(0,-3.0,0)
+	process.direction = direction.normalized() if not direction.is_zero_approx() else Vector3.UP
+	process.spread = 65
+	process.initial_velocity_min = 2.6
+	process.initial_velocity_max = 6.0
 	process.scale_min = 0.35
 	process.scale_max = 1.0
 	var gradient := Gradient.new()
@@ -53,9 +56,13 @@ func _ready() -> void:
 
 func _process(delta: float) -> void:
 	age += delta
-	material.set_shader_parameter("progress", minf(age/0.5,1.0))
+	material.set_shader_parameter("progress", minf(age/FLASH_DURATION,1.0))
 	var camera := get_viewport().get_camera_3d()
 	if camera:
+		# Keep the flash outside the victim's body while retaining scene depth occlusion.
+		flash.global_position = global_position + (camera.global_position - global_position).normalized() * 0.5
 		flash.look_at(camera.global_position,Vector3.UP,true)
-	if age > 0.65:
+		var angle := atan2(direction.dot(camera.global_basis.y), direction.dot(camera.global_basis.x))
+		material.set_shader_parameter("strike_angle", angle)
+	if age > LIFETIME:
 		queue_free()

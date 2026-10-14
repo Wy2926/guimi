@@ -6,7 +6,7 @@
 script = ExtResource("1")
 id = "swords"
 title = "万剑归宗"
-description = "飞剑自动穿插追击并归位；随等级增至六柄。读取独立攻击力，绕过双防，仍受元素与暴击影响。"
+description = "光剑横向环绕周身，自动加速斜刺8.5米内的敌人，命中爆闪，无需普攻；无目标时归位，随等级增至六柄。读取独立攻击力，绕过双防，仍受元素与暴击影响。"
 category = "passive"
 kind = 2
 coefficient = 0.2

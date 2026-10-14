@@ -29,7 +29,8 @@ if (!(Test-Path -LiteralPath (Join-Path $projectPath '.godot\imported'))) {
     if ($LASTEXITCODE -ne 0) { throw 'Godot asset import failed.' }
 }
 $arguments = @('--path', $projectPath)
-if ($Headless) { $arguments += '--headless' }
+# Automated verification must never open a game window or steal desktop focus.
+if ($Headless -or $Verify) { $arguments += '--headless' }
 if ($Editor) { $arguments += '--editor' }
 if ($Verify) {
     $arguments += @('--', '--verify', "--fps=$VerifyFps", "--perf-enemies=$PerfEnemies")

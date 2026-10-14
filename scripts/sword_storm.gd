@@ -2,17 +2,27 @@ extends Node3D
 ## One growing sword formation: the same asset instances follow native attack/return paths.
 
 const RANGE := 8.5
-const SWORD_SCENE := preload("res://assets/weapons/niko_katana/sword.tscn")
+const SWORD_SCENE := preload("res://assets/weapons/astral_edge/astral_edge.tscn")
+const SWORD_VISUAL := preload("res://assets/weapons/astral_edge/astral_edge.gd")
 const MAX_ACTIVE_SWORDS := 6
-const BLADE_SCALE := 1.8
+# Keep the authored model; its in-game length is now ~2.31 units instead of 3.55.
+const BLADE_SCALE := 0.65
+const BLADE_CONTACT := Vector3(0, 2.6, 0)
+const APPROACH_SPEED := 9.0
+const STRIKE_SPEED := 48.0
+const STRIKE_HOLD := 0.085
+const ORBIT_RADIUS := 1.65
+const ORBIT_HEIGHT := 1.25
+const ORBIT_SPEED := 0.55
 const VOLLEY_INTERVAL := 0.24
 const METEOR_RADIUS := 3.2
 const METEOR_DELAY := 0.9
 
+enum FlightPhase { APPROACH, STRIKE, RETURN }
+
 var player: DuelFighter
 var progression: RunProgression
 var feedback: Node3D
-var camera: Camera3D
 var active := true
 var active_swords: int:
 	get: return flights.size()
@@ -29,7 +39,6 @@ var meteors: Array[Dictionary] = []
 var blades: Array[Node3D] = []
 var slots: Array[Node3D] = []
 var halo: Node3D
-var fire_left := 0.0
 var volley_left := 0.0
 var clock := 0.0
 var target_cursor := 0
@@ -38,8 +47,10 @@ var sword_query := PhysicsShapeQueryParameters3D.new()
 var meteor_query := PhysicsShapeQueryParameters3D.new()
 
 func _ready() -> void:
-	var tip := SphereShape3D.new()
-	tip.radius = 0.48
+	# A native swept capsule covers the blade's contact point between physics ticks.
+	var tip := CapsuleShape3D.new()
+	tip.radius = 0.32
+	tip.height = tip.radius * 2.0
 	sword_query.shape = tip
 	sword_query.collision_mask = 4
 	var blast := SphereShape3D.new()
@@ -65,6 +76,7 @@ func refresh_skills() -> void:
 			slots.append(slot)
 			var blade := SWORD_SCENE.instantiate() as Node3D
 			blade.scale = Vector3.ONE * BLADE_SCALE
+			blade.phase = blades.size() * 1.8
 			slot.add_child(blade)
 			blades.append(blade)
 		_update_formation()
@@ -73,31 +85,18 @@ func _make_halo() -> void:
 	halo = Node3D.new()
 	halo.name = "SwordFormation"
 	add_child(halo)
-	# A single gentle emitter for the entire standing formation.
-	var motes: GPUParticles3D = feedback.attach_trail(halo, Color("78c9dc"), 24, 0.75)
-	motes.position = Vector3(0, 2.6, 0)
-	var process := motes.process_material as ParticleProcessMaterial
-	process.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_BOX
-	process.emission_box_extents = Vector3(2.0, 0.65, 0.05)
+	# The authored sword scene already owns its idle motes and flight trail.
 	halo.visible = active
-	motes.emitting = active
 
 func _update_formation() -> void:
 	halo.visible = active
-	halo.global_position = player.global_position - player.facing * 1.25
-	if is_instance_valid(camera):
-		var view_depth := camera.global_position - player.global_position
-		view_depth.y = 0.0
-		# Still behind the fighter, with enough screen-depth clearance above the helmet.
-		halo.global_position -= view_depth.normalized() * 0.8
-	var forward := camera.global_position - halo.global_position if is_instance_valid(camera) else -player.facing
-	halo.rotation.y = atan2(forward.x, forward.z)
-	var half_width := 1.1 + maxf(0.0, slots.size() - 2.0) * 0.24
+	halo.global_position = player.global_position
 	for i in slots.size():
-		var offset := lerpf(-1.0, 1.0, float(i) / maxf(1.0, slots.size() - 1.0))
-		slots[i].position = Vector3(offset * half_width, 2.3 + (1.0 - absf(offset)) * 0.4 + sin(clock * 1.8 + i) * 0.055, 0)
-		# The source scene's long/tip axis is +Y. No fan roll: every idle sword stands up.
-		slots[i].rotation = Vector3.ZERO
+		var angle := TAU * float(i) / float(slots.size()) + clock * ORBIT_SPEED
+		slots[i].position = Vector3(cos(angle) * ORBIT_RADIUS, ORBIT_HEIGHT, sin(angle) * ORBIT_RADIUS)
+		# +Y is the blade axis, +Z the decorated front: lie flat, point along the orbit,
+		# and keep the front facing up toward the arena camera.
+		slots[i].rotation = Vector3(-PI / 2.0, PI - angle, 0)
 
 func reset() -> void:
 	# Killing these bound tweens also cancels every pending impact on reset/toggle.
@@ -111,7 +110,6 @@ func reset() -> void:
 	blades.clear()
 	slots.clear()
 	halo = null
-	fire_left = 0.0
 	volley_left = 0.0
 	volley_count = 0
 	chain_count = 0
@@ -123,24 +121,17 @@ func reset() -> void:
 	blade_cursor = 0
 	refresh_skills()
 
-func on_swing(heavy: bool) -> void:
-	if not active or not player.enabled or player.dead:
+func on_swing(_heavy: bool) -> void:
+	# Only meteor is swing-triggered. Swords acquire targets in their own physics tick.
+	if not active or not player.enabled or player.dead or progression.skill_level("meteor") <= 0:
 		return
-	refresh_skills()
 	var targets := _targets()
 	if targets.is_empty():
 		return
-	if progression.skill_level("swords") > 0:
-		# Bridge the slowest normal combo and active-skill recovery, not just its hit frame.
-		var grace := maxf(1.35, 1.3 / maxf(player.attack_speed, 0.5)) if heavy else maxf(1.15, 1.1 / maxf(player.attack_speed, 0.5))
-		fire_left = maxf(fire_left, grace)
-		if volley_left <= 0.0:
-			_fire_volley(targets)
 	# Only the authored player's swing rolls this once. Auxiliary hits never call it.
-	if progression.skill_level("meteor") > 0:
-		meteor_rolls += 1
-		if rng.randf() < meteor_chance and meteors.size() < 2:
-			_call_meteor(targets[rng.randi_range(0, targets.size() - 1)])
+	meteor_rolls += 1
+	if rng.randf() < meteor_chance and meteors.size() < 2:
+		_call_meteor(targets[rng.randi_range(0, targets.size() - 1)])
 
 func _targets() -> Array[Node3D]:
 	var targets: Array[Node3D] = []
@@ -152,7 +143,7 @@ func _targets() -> Array[Node3D]:
 func _physics_process(delta: float) -> void:
 	clock += delta
 	if player.dead or not player.enabled:
-		if fire_left > 0.0 or not flights.is_empty() or not meteors.is_empty():
+		if not flights.is_empty() or not meteors.is_empty():
 			reset()
 		if is_instance_valid(halo):
 			halo.hide()
@@ -165,16 +156,16 @@ func _physics_process(delta: float) -> void:
 			reset()
 		return
 	volley_left = maxf(0.0, volley_left - delta)
-	fire_left = maxf(0.0, fire_left - delta)
-	if progression.skill_level("swords") > 0 and fire_left > 0.0 and volley_left <= 0.0:
+	if progression.skill_level("swords") > 0 and volley_left <= 0.0:
+		# Bound idle target scans too; no attack animation or swing grace is required.
+		volley_left = VOLLEY_INTERVAL
 		_fire_volley(_targets())
-	_advance_swords(delta)
+	_advance_swords()
 	_advance_meteors(delta)
 
 func _fire_volley(targets: Array[Node3D]) -> void:
 	if targets.is_empty() or blades.is_empty():
 		return
-	volley_left = VOLLEY_INTERVAL
 	var launched := 0
 	for i in blades.size():
 		var slot := blade_cursor % blades.size()
@@ -216,18 +207,7 @@ func _launch_sword(target: Node3D, slot: int) -> void:
 	var blade := blades[slot]
 	var start := blade.global_position
 	blade.reparent(follow)
-	var trail: GPUParticles3D = feedback.attach_trail(follow, Color("f3cd8d") if slot % 3 == 0 else Color("77dcff"), 36, 0.38)
-	# Native velocity-aligned particles overlap into a readable curved light wake.
-	var wake := trail.draw_pass_1 as SphereMesh
-	wake.radius = 0.026
-	wake.height = 0.44
-	var wake_process := trail.process_material as ParticleProcessMaterial
-	wake_process.particle_flag_align_y = true
-	wake_process.direction = Vector3.BACK
-	wake_process.spread = 3.0
-	wake_process.initial_velocity_min = 0.15
-	wake_process.initial_velocity_max = 0.25
-	var flight := {"path": path, "follow": follow, "target": weakref(target), "hit_ids": [], "age": 0.0, "duration": 0.0, "blade": blade, "trail": trail, "tween": null, "through": Vector3.UP, "slot": slot, "returning": false, "leg": 0}
+	var flight := {"path": path, "follow": follow, "target": weakref(target), "hit_ids": [], "duration": 0.0, "blade": blade, "tween": null, "through": Vector3.UP, "slot": slot, "phase": FlightPhase.APPROACH, "leg": 0, "previous_contact": start}
 	_route_sword(flight, target, start)
 	flights.append(flight)
 
@@ -240,34 +220,61 @@ func _route_sword(flight: Dictionary, target: Node3D, start: Vector3) -> void:
 	if direction.length_squared() < 0.01:
 		direction = player.facing
 	var side := direction.cross(Vector3.UP) * (-1.0 if (int(flight.slot) + int(flight.leg)) % 2 == 0 else 1.0)
-	var sweep := start.lerp(contact, 0.32) + side * (1.5 + int(flight.slot) % 3 * 0.3) + Vector3.UP * (1.0 if first else 0.65)
-	var approach := contact - direction * 1.2 + side * 0.25 + Vector3.UP * 0.2
-	var through := direction * 1.8
-	var departure: Vector3 = Vector3.UP if first else (flight.through as Vector3).normalized()
+	# The curved approach ends moving sideways ABOVE the victim, not through them.
+	# A separate straight stab must visibly break this tangent to reach the body.
+	var approach := contact - direction * 2.4 + side * 1.7 + Vector3.UP * 1.6
+	var sweep := start.lerp(approach, 0.5) + side * 0.8 + Vector3.UP * 0.45
+	var departure: Vector3 = slots[flight.slot].global_basis.y if first else (flight.through as Vector3).normalized()
 	var curve := Curve3D.new()
 	curve.bake_interval = 0.08
 	curve.add_point(start, Vector3.ZERO, departure * 1.1 + side * 0.3)
-	curve.add_point(sweep, -direction * 0.75, direction * 0.85)
-	curve.add_point(approach, -direction * 0.55, direction * 0.55)
-	curve.add_point(contact, -through * 0.4, through * 0.4)
-	curve.add_point(contact + through, -through * 0.4, Vector3.ZERO)
+	curve.add_point(sweep, -direction * 0.65, direction * 0.65)
+	curve.add_point(approach, -side * 0.85, Vector3.ZERO)
 	flight.path.curve = curve
 	flight.follow.progress = 0.0
 	flight.blade.position = Vector3.ZERO
-	flight.age = 0.0
-	flight.duration = clampf(curve.get_baked_length() / 15.0, 0.52, 1.05)
+	flight.duration = clampf(curve.get_baked_length() / APPROACH_SPEED, 0.36, 0.75)
 	flight.target = weakref(target)
-	flight.through = through
+	flight.approach_offset = approach - target.global_position
+	flight.through = side
 	flight.hit_ids.clear()
-	flight.returning = false
+	flight.phase = FlightPhase.APPROACH
+	flight.blade.set_motion(SWORD_VISUAL.Motion.CHARGE)
 	flight.leg += 1
 	if not first:
 		chain_count += 1
 	feedback.storm_muzzle(start)
 	var tween: Tween = flight.path.create_tween().set_process_mode(Tween.TWEEN_PROCESS_PHYSICS).set_parallel()
-	tween.tween_property(flight.follow, "progress_ratio", 1.0, flight.duration).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_IN_OUT)
+	tween.tween_property(flight.follow, "progress_ratio", 1.0, flight.duration).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
 	# +Y is the asset's blade axis; PathFollow3D advances along its local -Z.
 	tween.tween_property(flight.blade, "rotation", Vector3(-PI / 2.0, 0, 0), 0.14).set_trans(Tween.TRANS_SINE)
+	flight.tween = tween
+
+func _strike_sword(flight: Dictionary, target: Node3D) -> void:
+	flight.tween.kill()
+	var follow := flight.follow as PathFollow3D
+	var blade := flight.blade as Node3D
+	var start := follow.global_position
+	var contact := target.global_position + Vector3.UP * 1.05
+	var direction := (contact - start).normalized()
+	# The blade, rather than its pommel, enters the body. Hold it briefly embedded.
+	var destination := contact - direction * (BLADE_CONTACT.y * BLADE_SCALE - 0.22)
+	var curve := Curve3D.new()
+	curve.add_point(start)
+	curve.add_point(destination)
+	flight.path.curve = curve
+	follow.progress = 0.0
+	blade.rotation = Vector3(-PI / 2.0, 0, 0)
+	blade.set_motion(SWORD_VISUAL.Motion.FLIGHT)
+	flight.previous_contact = blade.to_global(BLADE_CONTACT)
+	flight.through = direction
+	flight.phase = FlightPhase.STRIKE
+	var travel_time := curve.get_baked_length() / STRIKE_SPEED
+	flight.duration = travel_time + STRIKE_HOLD
+	# No ease-in and no homing bend during a committed stab: speed changes immediately.
+	var tween: Tween = flight.path.create_tween().set_process_mode(Tween.TWEEN_PROCESS_PHYSICS)
+	tween.tween_property(follow, "progress_ratio", 1.0, travel_time).set_trans(Tween.TRANS_LINEAR)
+	tween.tween_interval(STRIKE_HOLD)
 	flight.tween = tween
 
 func _return_sword(flight: Dictionary) -> void:
@@ -276,7 +283,7 @@ func _return_sword(flight: Dictionary) -> void:
 	var blade := flight.blade as Node3D
 	var start := follow.global_position
 	var destination := slots[flight.slot].global_position
-	var side := Vector3.RIGHT.rotated(Vector3.UP, halo.rotation.y) * (-1.0 if flight.slot % 2 == 0 else 1.0)
+	var side := slots[flight.slot].global_basis.x * (-1.0 if flight.slot % 2 == 0 else 1.0)
 	var middle := start.lerp(destination, 0.55) + side * 0.85 + Vector3.UP * 1.3
 	var curve := Curve3D.new()
 	curve.bake_interval = 0.10
@@ -285,71 +292,80 @@ func _return_sword(flight: Dictionary) -> void:
 	curve.add_point(destination, -slots[flight.slot].global_basis.y * 0.7, Vector3.ZERO)
 	flight.path.curve = curve
 	follow.progress = 0.0
-	flight.age = 0.0
 	flight.duration = clampf(curve.get_baked_length() / 20.0, 0.34, 0.58)
-	flight.returning = true
+	flight.phase = FlightPhase.RETURN
+	blade.set_motion(SWORD_VISUAL.Motion.RETURN)
 	# Native path playback remains the only motion driver on the return leg too.
 	var tween: Tween = flight.path.create_tween().set_process_mode(Tween.TWEEN_PROCESS_PHYSICS).set_parallel()
 	tween.tween_property(follow, "progress_ratio", 1.0, flight.duration).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
 	tween.tween_property(blade, "global_rotation", slots[flight.slot].global_rotation, 0.14).set_delay(flight.duration - 0.14)
 	flight.tween = tween
 
-func _advance_swords(delta: float) -> void:
+func _advance_swords() -> void:
 	var targets: Array[Node3D] = []
 	var found_targets := false
 	for i in range(flights.size() - 1, -1, -1):
 		var flight := flights[i]
-		flight.age += delta
 		var follow := flight.follow as PathFollow3D
-		if flight.returning and fire_left <= 0.0:
+		if flight.phase == FlightPhase.RETURN:
 			flight.path.curve.set_point_position(2, slots[flight.slot].global_position)
-			if flight.age >= flight.duration:
+			flight.path.curve.set_point_in(2, -slots[flight.slot].global_basis.y * 0.7)
+			if not flight.tween.is_running():
 				flight.tween.kill()
 				flight.blade.reparent(slots[flight.slot])
 				flight.blade.position = Vector3.ZERO
 				flight.blade.rotation = Vector3.ZERO
 				flight.blade.scale = Vector3.ONE * BLADE_SCALE
-				flight.trail.emitting = false
-				# Let world-space particles die away after the actual sword is home.
-				var fade: Tween = flight.path.create_tween()
-				fade.tween_interval(0.40)
-				fade.tween_callback(flight.path.queue_free)
+				flight.blade.set_motion(SWORD_VISUAL.Motion.IDLE)
+				flight.path.queue_free()
 				flights.remove_at(i)
-			continue
-		if fire_left <= 0.0:
-			_return_sword(flight)
 			continue
 		var target := (flight.target as WeakRef).get_ref() as Node3D
 		var target_valid: bool = is_instance_valid(target) and not target.dead and target.is_visible_in_tree() and target.global_position.distance_to(player.global_position) <= RANGE * player.stats.range_multiplier
-		if flight.returning or flight.age >= flight.duration or not target_valid:
-			# At most one target scan for all re-routing swords in this physics tick.
-			if not found_targets:
-				targets = _targets()
-				found_targets = true
-			var next := _next_target(targets, target if is_instance_valid(target) else null)
-			if is_instance_valid(next):
-				_route_sword(flight, next, follow.global_position)
-			else:
-				# No targets ends the whole formation's combat grace, not six return loops.
-				fire_left = 0.0
-				_return_sword(flight)
-			continue
-		# Gently update only the destination while the blade is approaching; its curved
-		# launch stays intact. Once it passes the target it continues through, not orbiting.
-		if follow.progress_ratio < 0.67:
-			var contact := target.global_position + Vector3.UP * 1.05
-			flight.path.curve.set_point_position(3, contact)
-			flight.path.curve.set_point_position(4, contact + flight.through)
-		sword_query.transform = Transform3D(Basis.IDENTITY, follow.global_position)
-		for result in get_world_3d().direct_space_state.intersect_shape(sword_query, 128):
-			var body := result.collider as Node3D
-			if not is_instance_valid(body) or body.dead or not body.is_visible_in_tree() or body.get_instance_id() in flight.hit_ids:
+		if flight.phase == FlightPhase.STRIKE:
+			_strike_contacts(flight)
+			# Finish the short committed stab/hold even if its hit killed the target.
+			if flight.tween.is_running():
 				continue
-			flight.hit_ids.append(body.get_instance_id())
-			var definition := progression.skill("swords")
-			var hit := player.deal_damage(body, definition.kind, progression.coefficient("swords"), definition.element, false, true, "飞剑")
-			if hit.get("actual", 0) > 0:
-				sword_hits += 1
+		elif target_valid:
+			flight.path.curve.set_point_position(2, target.global_position + flight.approach_offset)
+			if flight.tween.is_running():
+				continue
+			_strike_sword(flight, target)
+			continue
+		# At most one target scan for all re-routing swords in this physics tick.
+		if not found_targets:
+			targets = _targets()
+			found_targets = true
+		var next := _next_target(targets, target if is_instance_valid(target) else null)
+		if is_instance_valid(next):
+			_route_sword(flight, next, follow.global_position)
+		else:
+			_return_sword(flight)
+
+func _strike_contacts(flight: Dictionary) -> void:
+	var contact: Vector3 = flight.blade.to_global(BLADE_CONTACT)
+	var previous: Vector3 = flight.previous_contact
+	var motion := contact - previous
+	flight.previous_contact = contact
+	var shape := sword_query.shape as CapsuleShape3D
+	shape.height = motion.length() + shape.radius * 2.0
+	var basis := Basis(Quaternion(Vector3.UP, motion.normalized())) if motion.length_squared() > 0.00001 else Basis.IDENTITY
+	sword_query.transform = Transform3D(basis, (previous + contact) * 0.5)
+	for result in get_world_3d().direct_space_state.intersect_shape(sword_query, 128):
+		var body := result.collider as Node3D
+		if not is_instance_valid(body) or body.dead or not body.is_visible_in_tree() or body.get_instance_id() in flight.hit_ids:
+			continue
+		if body.global_position.distance_to(player.global_position) > RANGE * player.stats.range_multiplier:
+			continue
+		flight.hit_ids.append(body.get_instance_id())
+		var definition := progression.skill("swords")
+		var point := body.global_position + Vector3.UP * 1.05
+		var hit := player.deal_damage(body, definition.kind, progression.coefficient("swords"), definition.element, false, true, "飞剑", flight.through)
+		if hit.get("actual", 0) > 0:
+			sword_hits += 1
+			# Per-contact flashes do not share the arena's camera/accent throttle.
+			feedback.storm_hit(point, flight.through, bool(hit.get("lethal", false)))
 
 func _call_meteor(target: Node3D) -> void:
 	if not player.enabled or progression.skill_level("meteor") == 0:

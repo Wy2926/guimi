@@ -1,6 +1,8 @@
 extends Node3D
 ## Godot particles, mesh/material tweens and positional audio; no third-party runtime.
 
+const SWORD_IMPACT := preload("res://assets/weapons/astral_edge/impact.tscn")
+
 const SOUNDS := {
 	"swish": preload("res://assets/audio/knifeSlice.ogg"),
 	"spin": preload("res://assets/audio/knifeSlice2.ogg"),
@@ -290,27 +292,17 @@ func storm_muzzle(pos: Vector3) -> void:
 	process.spread = 100.0
 
 func storm_hit(pos: Vector3, direction: Vector3, lethal := false) -> void:
-	# A volley can hit several enemies together: keep the per-sword accent light.
+	# Every actual contact gets a local flash; expensive light/audio accents stay capped.
 	var now := Time.get_ticks_msec()
 	if now - _last_storm_sound >= 85:
-		sound("metal", pos, -17.5, 1.55)
+		sound("metal", pos, -13.5, 1.35)
+		_light_flash(pos, Color("bdefff"), 2.8, 2.6, 0.10)
 		_last_storm_sound = now
-	var sparks := _burst(pos, direction + Vector3.UP * 0.2, 14 if lethal else 10, Color("94f1ff"), 0.3, 4.0, 0.033)
-	var process := sparks.process_material as ParticleProcessMaterial
-	process.gravity = Vector3(0, -2.0, 0)
-	for i in 2:
-		var ray := MeshInstance3D.new()
-		var mesh := BoxMesh.new()
-		mesh.size = Vector3(0.024, 0.024, 0.46 + i * 0.18)
-		ray.mesh = mesh
-		ray.material_override = _emissive(Color("d2faff") if i == 0 else Color("ffe2a2"), 2.0)
-		ray.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-		add_child(ray)
-		ray.global_position = pos
-		ray.rotation = Vector3(0.6 + i, atan2(direction.x, direction.z) + i * 1.2, 0.4)
-		var tween := ray.create_tween()
-		tween.tween_property(ray, "scale", Vector3(0.02, 0.02, 1.45), 0.12)
-		tween.tween_callback(ray.queue_free)
+	var impact := SWORD_IMPACT.instantiate() as Node3D
+	impact.direction = direction
+	impact.scale = Vector3.ONE * (1.0 if lethal else 0.85)
+	add_child(impact)
+	impact.global_position = pos
 
 func meteor_warning(pos: Vector3, duration: float, radius := 3.2) -> MeshInstance3D:
 	# The outside circle declares the damage radius; the inner one closes.

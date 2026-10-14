@@ -20,6 +20,7 @@ var max_nodes := 0
 var max_active_swords := 0
 var max_active_meteors := 0
 var max_active_orbs := 0
+var sword_checks_completed := false
 var orb_checks_completed := false
 var performance: Dictionary = {"requested": false}
 
@@ -133,7 +134,7 @@ func run() -> void:
 		finish_report()
 		return
 	scene.set_frame_limit(requested_fps)
-	check(scene.player.progression == scene.progression and scene.storm.player == scene.player and scene.storm.progression == scene.progression and scene.storm.feedback == scene.feedback and scene.storm.camera == scene.camera, "Combat dependencies are explicitly supplied by the scene")
+	check(scene.player.progression == scene.progression and scene.storm.player == scene.player and scene.storm.progression == scene.progression and scene.storm.feedback == scene.feedback, "Combat dependencies are explicitly supplied by the scene")
 	check(scene.orbs.player == scene.player and scene.orbs.progression == scene.progression and scene.orbs.feedback == scene.feedback and scene.orbs.camera == scene.camera, "Periodic orb dependencies are explicitly supplied by the scene")
 	check(scene.camera.projection == Camera3D.PROJECTION_ORTHOGONAL, "The game uses an orthographic 2.5D view")
 	var pitch := rad_to_deg(asin(clampf(scene.camera.global_basis.z.y, -1.0, 1.0)))
@@ -155,6 +156,7 @@ func run() -> void:
 	await check_pickups_and_choices()
 	await check_pause()
 	await check_auxiliary_skills()
+	check(sword_checks_completed, "The automatic sword integration checks reach completion without a skipped runtime error")
 	await check_thunder_orbs()
 	check(orb_checks_completed, "The periodic-orb integration checks reach completion without a skipped runtime error")
 	await check_crowd_hits()
@@ -265,6 +267,14 @@ func check_progression() -> void:
 	second.free()
 
 func check_automatic_combat() -> void:
+	await prepare(false)
+	var capsule := scene.player.get_node("CollisionShape3D").shape as CapsuleShape3D
+	check(scene.player.visual.scale.is_equal_approx(Vector3.ONE) and is_equal_approx(capsule.radius, 0.28) and is_equal_approx(capsule.height, 1.27), "The player model is reduced from 1.3x to 1.0x with a matching smaller body collider")
+	Input.action_press("move_right")
+	await physics_wait(0.4)
+	var movement_speed := Vector2(scene.player.velocity.x, scene.player.velocity.z).length()
+	Input.action_release("move_right")
+	check(is_equal_approx(scene.player.stats.move_speed, 6.8) and absf(movement_speed - 6.8) < 0.05, "Real movement reaches the increased 6.8-unit base speed through the existing stat")
 	await prepare(true)
 	var target := enemy_at(Vector3(0, 0.04, -1.5))
 	await physics_wait(0.03)
@@ -522,6 +532,28 @@ func blade_ids() -> Array[int]:
 		ids.append(blade.get_instance_id())
 	return ids
 
+func model_bounds(root: Node3D) -> AABB:
+	var bounds := AABB()
+	for mesh: MeshInstance3D in root.find_children("*", "MeshInstance3D", true, false):
+		if mesh.mesh != null:
+			bounds = bounds.merge((root.global_transform.affine_inverse() * mesh.global_transform) * mesh.get_aabb())
+	return bounds
+
+func horizontal_formation() -> bool:
+	if not is_instance_valid(scene.storm.halo) or scene.storm.blades.is_empty():
+		return false
+	var centered: bool = scene.storm.halo.global_position.distance_to(scene.player.global_position) < 0.01
+	var center := Vector3.ZERO
+	for index in scene.storm.blades.size():
+		var blade: Node3D = scene.storm.blades[index]
+		var slot: Node3D = scene.storm.slots[index]
+		var offset: Vector3 = slot.global_position - scene.player.global_position
+		center += offset
+		centered = centered and blade.get_parent() == slot and blade.motion == 0 and absf(offset.y - 1.25) < 0.01
+		centered = centered and absf(Vector2(offset.x, offset.z).length() - 1.65) < 0.01
+		centered = centered and absf(blade.global_basis.y.normalized().dot(Vector3.UP)) < 0.01 and blade.global_basis.z.normalized().dot(Vector3.UP) > 0.99
+	return centered and Vector2(center.x, center.z).length() < 0.01
+
 func check_auxiliary_skills() -> void:
 	await prepare(false)
 	var target := enemy_at(Vector3(0, 0.04, -4.0), 10000.0)
@@ -535,24 +567,72 @@ func check_auxiliary_skills() -> void:
 	await physics_wait(1.1)
 	check(scene.storm.meteor_hits > 0 and target.health < 10000.0 and scene.storm.meteor_rolls == 1 and scene.storm.meteor_count == 1, "A real meteor lands without recursively rolling auxiliary skills")
 	await prepare(false)
-	target = enemy_at(Vector3(0, 0.04, -4.0), 10000.0)
+	target = enemy_at(Vector3(0, 0.04, -10.0), 10000.0)
 	target.stats.physical_defense = 10000.0
 	target.stats.magic_defense = 10000.0
 	scene.progression.skills.swords = 1
 	scene.storm.refresh_skills()
 	var original_ids := blade_ids()
 	check(original_ids.size() == 2 and scene.storm.slots.size() == 2, "Unlocking swords instantiates exactly two source-asset blades")
-	await physics_wait(0.04)
-	var standing: bool = (scene.storm.halo.global_position - scene.player.global_position).dot(scene.player.facing) < -0.5
+	var reused := true
 	for blade: Node3D in scene.storm.blades:
-		standing = standing and blade.global_basis.y.normalized().dot(Vector3.UP) > 0.99 and blade.scale.x >= 1.7
-	check(standing, "Idle blades stand upright behind the fighter and are visibly enlarged")
-	await capture("swords-two-standing")
+		reused = reused and blade.scene_file_path == "res://assets/weapons/astral_edge/astral_edge.tscn" and blade.fins.size() == 2 and is_instance_valid(blade.wake) and is_instance_valid(blade.ambient)
+	check(reused, "The formation reuses the authored Astral Edge scene, fins, idle particles and trail")
+	var new_size: Vector3 = model_bounds(scene.storm.blades[0]).size * scene.storm.BLADE_SCALE
+	check(absf(new_size.y - 2.31) < 0.03 and is_equal_approx(scene.storm.blades[0].scale.x, 0.65), "The existing sword is reduced to 65 percent scale, about 2.31 units long")
+	await physics_wait(0.3)
+	check(horizontal_formation(), "Idle swords lie horizontally in an evenly spaced ring around the player")
+	check(scene.storm.volley_count == 0 and target.health == 10000.0, "A target beyond the 8.5-unit range neither launches swords nor receives damage")
+	var first_position: Vector3 = scene.storm.slots[0].position
+	Input.action_press("move_right")
+	await physics_wait(0.25)
+	Input.action_release("move_right")
+	await physics_wait(0.25)
+	check(horizontal_formation() and scene.storm.slots[0].position.distance_to(first_position) > 0.2, "The horizontal ring orbits while following player movement and turning")
+	await capture("swords-two-orbiting")
+	target.position = Vector3(0, 0.04, -4.0)
+	target.hide()
+	await physics_wait(0.3)
+	check(scene.storm.volley_count == 0, "Hidden enemies inside range do not trigger the automatic swords")
+	target.show()
+	var launched := await until(func() -> bool: return scene.storm.active_swords == 2, 0.4)
+	check(launched and scene.player.attack_count == 0, "Swords launch at an in-range enemy with auto-attack disabled and no swing event")
+	if not launched:
+		return
+	await physics_wait(0.2)
+	scene.toggle_pause()
+	var paused_blade: Node3D = scene.storm.blades[0]
+	var paused_position := paused_blade.global_position
+	var paused_clock: float = paused_blade.clock
+	var paused_hits: int = scene.storm.sword_hits
+	await physics_wait(0.2)
+	check(paused_blade.global_position.is_equal_approx(paused_position) and paused_blade.clock == paused_clock and scene.storm.sword_hits == paused_hits, "Pause freezes both automatic sword flight and its reused visual animation")
+	scene.toggle_pause()
 	var peak := 0
 	var continuous := true
+	var trail_seen := false
+	var trails_aligned := true
+	var impact_seen := false
+	var surface_flashes := true
+	var strike_samples: Dictionary = {}
+	var sharp_turns := 0
+	var abrupt_accelerations := 0
+	var peak_strike_speed := 0.0
+	var embedded_frames := 0
+	var aligned_stabs := true
+	var clean_approaches := true
+	var impact_events: Array[int] = [0]
+	var directional_flashes: Array[bool] = [true]
+	var record_impact: Callable = func(effect: Node) -> void:
+		if effect.scene_file_path == "res://assets/weapons/astral_edge/impact.tscn":
+			impact_events[0] += 1
+			directional_flashes[0] = directional_flashes[0] and effect.direction.y < -0.25
+	scene.feedback.child_entered_tree.connect(record_impact)
+	var initial_hits: int = scene.storm.sword_hits
+	# Shared camera/normal-hit throttling must not swallow these contact flashes.
+	scene._impact_left = 10.0
 	var upgraded_ids: Array[int] = []
 	for attempt in 12:
-		scene.storm.on_swing(false)
 		if attempt == 4:
 			scene.progression.skills.swords = 5
 			scene.storm.refresh_skills()
@@ -562,17 +642,90 @@ func check_auxiliary_skills() -> void:
 			await get_tree().physics_frame
 			peak = maxi(peak, scene.storm.active_swords)
 			for flight: Dictionary in scene.storm.flights:
-				continuous = continuous and not flight.returning
-	check(continuous and scene.storm.chain_count > 0, "Continuous attacks chain actual blade passes through the battlefield without returning home")
+				continuous = continuous and flight.phase != scene.storm.FlightPhase.RETURN
+				trail_seen = trail_seen or flight.blade.history.size() >= 3
+				trails_aligned = trails_aligned and flight.blade.wake.global_transform.is_equal_approx(Transform3D.IDENTITY)
+				var blade_id: int = flight.blade.get_instance_id()
+				var point: Vector3 = flight.follow.global_position
+				var previous: Dictionary = strike_samples.get(blade_id, {})
+				var speed := 0.0 if previous.is_empty() else point.distance_to(previous.point) * Engine.physics_ticks_per_second
+				var tangent: Vector3 = -flight.path.curve.get_point_in(2).normalized() if flight.phase == scene.storm.FlightPhase.APPROACH else flight.through
+				if flight.phase == scene.storm.FlightPhase.STRIKE:
+					aligned_stabs = aligned_stabs and flight.through.y < -0.25 and flight.blade.global_basis.y.normalized().dot(flight.through) > 0.99
+					peak_strike_speed = maxf(peak_strike_speed, speed)
+					if not previous.is_empty() and previous.phase == scene.storm.FlightPhase.APPROACH:
+						if previous.tangent.dot(flight.through) < 0.65:
+							sharp_turns += 1
+						if speed > 30.0 and speed > previous.speed * 4.0:
+							abrupt_accelerations += 1
+					if flight.follow.progress_ratio > 0.999 and speed < 0.01 and flight.blade.to_global(scene.storm.BLADE_CONTACT).distance_to(target.global_position + Vector3.UP * 1.05) < 0.5:
+						embedded_frames += 1
+				else:
+					clean_approaches = clean_approaches and flight.hit_ids.is_empty() and flight.blade.motion == 1
+				strike_samples[blade_id] = {"phase": flight.phase, "point": point, "speed": speed, "tangent": tangent}
+			for effect in scene.feedback.get_children():
+				if effect.scene_file_path == "res://assets/weapons/astral_edge/impact.tscn" and effect.age > 0.0:
+					impact_seen = true
+					var offset: Vector3 = effect.flash.global_position - effect.global_position
+					var toward_camera: Vector3 = (scene.camera.global_position - effect.global_position).normalized()
+					surface_flashes = surface_flashes and absf(offset.length() - 0.5) < 0.001 and offset.normalized().dot(toward_camera) > 0.99
+	check(continuous and scene.storm.chain_count > 0 and scene.player.attack_count == 0, "Automatic swords continuously chain real passes without any basic attacks or swing refresh")
+	check(trail_seen and trails_aligned and impact_seen, "Flight reuses correctly aligned world-space trails and hits instantiate the existing impact scene")
+	check(impact_seen and surface_flashes, "Impact flash geometry sits half a unit toward the camera, outside the victim body")
+	check(clean_approaches and sharp_turns > 0 and aligned_stabs, "Damage-free curved approaches abruptly turn into blade-aligned diagonal stabs at the body")
+	check(abrupt_accelerations > 0 and peak_strike_speed >= 44.0 and peak_strike_speed < 55.0, "Stab movement abruptly accelerates to the authored 48-unit speed without teleporting (peak %.2f)" % peak_strike_speed)
+	check(embedded_frames > 0, "The sword holds its embedded contact pose before routing the next attack")
+	check(impact_events[0] == scene.storm.sword_hits - initial_hits and impact_events[0] > 0 and directional_flashes[0], "Every actual stab hit emits one matching directional flash even while shared hit accents are throttled")
+	scene.feedback.child_entered_tree.disconnect(record_impact)
 	await capture("swords-battlefield")
-	await until(func() -> bool: return scene.storm.active_swords == 0, 4.0)
-	var returned: bool = scene.storm.active_swords == 0 and blade_ids() == upgraded_ids
-	for index in scene.storm.blades.size():
-		returned = returned and scene.storm.blades[index].get_parent() == scene.storm.slots[index] and scene.storm.blades[index].global_basis.y.normalized().dot(Vector3.UP) > 0.99 and scene.storm.blades[index].scale.x >= 1.7
-	check(peak > 0 and peak <= 6 and scene.storm.blades.size() == 6, "Repeated volleys never create more than the six physical blades")
+	check(peak > 0 and peak <= 6 and scene.storm.blades.size() == 6, "Automatic volleys never create more than the six physical blades")
 	check(scene.storm.sword_hits > 0 and target.health < 10000.0 and scene.storm.meteor_count == 0, "Fixed-damage swords hit through high double defense without unlocking meteor")
-	check(returned, "The same six blade instances return upright after the attack sequence ends")
-	await capture("swords-six-standing")
+	target.position = Vector3(0, 0.04, -12.0)
+	var distant_health := target.health
+	Input.action_press("move_right")
+	await physics_wait(0.25)
+	Input.action_release("move_right")
+	await until(func() -> bool: return scene.storm.active_swords == 0, 4.0)
+	await physics_wait(0.25)
+	check(scene.storm.active_swords == 0 and blade_ids() == upgraded_ids and horizontal_formation() and target.health == distant_health, "Leaving range returns the same six swords to the moving horizontal ring and stops damage")
+	await capture("swords-six-orbiting")
+	target.global_position = scene.player.global_position + Vector3.FORWARD * 10.0
+	scene.player.stats.range_multiplier = 1.5
+	scene.progression.skills.meteor = 1
+	scene.storm.meteor_chance = 1.0
+	check(await until(func() -> bool: return scene.storm.active_swords > 0, 0.4), "Increasing the existing range stat automatically reacquires a previously out-of-range enemy")
+	await physics_wait(1.4)
+	check(target.health < distant_health and scene.player.attack_count == 0 and scene.storm.meteor_rolls == 0, "Autonomous sword damage never rolls even an unlocked guaranteed meteor")
+	target.queue_free()
+	check(await until(func() -> bool: return scene.storm.active_swords == 0, 1.2), "Freed targets safely release all returning swords")
+	check(horizontal_formation() and blade_ids() == upgraded_ids, "Target loss retains all six original sword instances and restores their idle visual state")
+	await physics_wait(0.5)
+	var cleared_impacts := true
+	for effect in scene.feedback.get_children():
+		cleared_impacts = cleared_impacts and effect.scene_file_path != "res://assets/weapons/astral_edge/impact.tscn"
+	check(cleared_impacts, "Directional impact flashes free themselves after the burst instead of accumulating")
+	scene.player.enabled = false
+	await physics_wait(0.05)
+	check(not scene.storm.halo.visible and scene.storm.active_swords == 0, "Disabling the player hides the formation and prevents automatic attacks")
+	# At 30 physics ticks the burst advances ~1.6 units per tick; point samples can tunnel.
+	await prepare(false)
+	var physics_rate := Engine.physics_ticks_per_second
+	Engine.physics_ticks_per_second = 30
+	target = enemy_at(Vector3(0, 0.04, -4.0), 10000.0)
+	scene.progression.skills.swords = 1
+	await physics_wait(1.1)
+	check(scene.storm.sword_hits > 0 and target.health < 10000.0, "Native swept contact still hits during the sudden stab at only 30 physics ticks per second")
+	Engine.physics_ticks_per_second = physics_rate
+	await prepare(false)
+	target = enemy_at(Vector3(0, 0.04, -4.0), 10000.0)
+	target.stats.dodge_chance = 1.0
+	scene.progression.skills.swords = 1
+	impact_events[0] = 0
+	scene.feedback.child_entered_tree.connect(record_impact)
+	await physics_wait(1.2)
+	check(scene.storm.chain_count > 0 and scene.storm.sword_hits == 0 and impact_events[0] == 0, "Dodged stabs neither apply damage nor emit a false impact flash")
+	scene.feedback.child_entered_tree.disconnect(record_impact)
+	sword_checks_completed = true
 
 func check_thunder_orbs() -> void:
 	await prepare(false)

@@ -94,7 +94,7 @@ func _update_wake(_delta: float) -> void:
 	wake.material_override.set_shader_parameter("visual_time", clock)
 	if not enable_trail or not is_visible_in_tree():
 		history.clear()
-	elif motion == Motion.FLIGHT or motion == Motion.RETURN:
+	elif motion in [Motion.CHARGE, Motion.FLIGHT, Motion.RETURN]:
 		var point := to_global(Vector3(0, 0.7, 0))
 		if history.is_empty() or history.back().distance_to(point) > 0.018:
 			if not history.is_empty() and history.back().distance_to(point) > 3.0:
@@ -105,7 +105,7 @@ func _update_wake(_delta: float) -> void:
 	elif not history.is_empty():
 		history.pop_front()
 	wake_mesh.clear_surfaces()
-	if history.size() < 3:
+	if history.size() < 2:
 		return
 	var camera := get_viewport().get_camera_3d()
 	if not camera:
